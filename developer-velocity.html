@@ -1,0 +1,1933 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub PR Insights</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <!-- For production, use Tailwind via npm and build CSS locally. Example: -->
+  <!-- <link href="dist/tailwind.css" rel="stylesheet"> -->
+  <!-- Remove the CDN script below for production use. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Keep original table layout helpers */
+    html {
+      scrollbar-gutter: stable;
+    }
+
+    #results table {
+      table-layout: auto;
+    }
+
+    #results table th:not(:first-child),
+    #results table td:not(:first-child) {
+      white-space: nowrap;
+      width: 1%;
+    }
+
+    #results table th:first-child,
+    #results table td:first-child {
+      width: auto;
+    }
+
+    #results table th:nth-child(2),
+    #results table td:nth-child(2) {
+      min-width: 80px;
+      width: 80px;
+      max-width: 80px;
+      white-space: nowrap;
+    }
+
+    /* Remove dark mode specific panel style; permanent dark backdrop if desired for overlay */
+    #progressPanel>div {
+      background: #ffffff;
+      color: #1f2937;
+    }
+
+    /* Page background now always dark gradient */
+    body.app-dark-bg {
+      background: radial-gradient(circle at 25% 20%, #1f2937 0%, #111827 55%, #0b0f19 100%);
+    }
+
+    /* Peer review / PR modal title visibility */
+    #prModalTitle,
+    #progressPanel .overlay-title {
+      color: #0f172a;
+      /* deep slate for contrast on white card */
+      font-weight: 600;
+      position: relative;
+      letter-spacing: .5px;
+    }
+  </style>
+</head>
+
+<body class="app-dark-bg min-h-screen text-gray-100 flex flex-col items-center relative overflow-y-scroll">
+
+  <!-- Background image -->
+  <div class="fixed inset-0 pointer-events-none">
+    <img src="photo-1501785888041-af3ef285b470.jpeg" alt="Background"
+      class="w-full h-full object-cover opacity-30 select-none">
+  </div>
+
+  <!-- Content -->
+  <div class="relative z-10 w-full max-w-5xl p-6">
+
+    <!-- Header -->
+    <header class="text-center mb-6">
+      <h1 class="text-3xl font-bold text-white">Developer Velocity</h1>
+      <p class="mt-2 text-gray-300">
+        This page analyzes GitHub pull requests and peer reviews for selected repositories and date ranges.
+        It shows per-user and per-month stats including PR counts, approvals, merges, reviews, average comments, and
+        estimated review times.
+      </p>
+      <p class="text-gray-400">
+        <br />
+        <b>NOTE: all processing is done in your browser and GitHub only.</b>
+      </p>
+    </header>
+
+    <!-- Form -->
+    <form id="prForm" class="bg-white text-gray-800 shadow-lg rounded p-6 md:p-8 grid gap-4 md:gap-6 w-full">
+      <input type="text" id="token" placeholder="GitHub Token" required
+        class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="text" id="repo"
+        placeholder="Repositories (e.g. owner1/repo1, owner2/repo2) or leave blank for all private repos"
+        class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateFrom" class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <input type="date" id="dateTo" class="border p-3 rounded w-full focus:ring-2 focus:ring-blue-400">
+      <button type="submit"
+        class="bg-blue-600 text-white py-3 px-6 rounded hover:bg-blue-700 transition w-full md:w-auto">
+        Get Developer Velocity
+      </button>
+    </form>
+
+    <!-- Results -->
+    <div id="results" class="mt-8 bg-white text-gray-800 shadow-md rounded p-4 overflow-x-auto hidden">
+      <!-- PR Table -->
+      <div id="prTablePanel" class="mb-8 hidden">
+        <h2 class="text-xl font-semibold mb-2 text-blue-900">Pull Requests</h2>
+        <table class="w-full border-collapse table-auto">
+          <thead>
+            <tr class="bg-blue-600 text-white text-left">
+              <th class="p-3">User</th>
+              <th class="p-3">Month</th>
+              <th class="p-3">Submitted</th>
+              <th class="p-3">Merged</th>
+              <th class="p-3">Updates</th>
+              <th class="p-3">Lines Merged</th>
+              <th class="p-3">Avg Merge (hrs)</th>
+            </tr>
+          </thead>
+          <tbody id="prTableBody"></tbody>
+        </table>
+      </div>
+      <!-- Peer Review Table -->
+      <div id="reviewTablePanel" class="hidden">
+        <h2 class="text-xl font-semibold mb-2 text-blue-900">Peer Reviews</h2>
+        <table class="w-full border-collapse table-auto">
+          <thead>
+            <tr class="bg-blue-600 text-white text-left">
+              <th class="p-3">User</th>
+              <th class="p-3">Month</th>
+              <th class="p-3">PRs Reviewed</th>
+              <th class="p-3">Avg Review (min)</th>
+              <th class="p-3">Avg Comments</th>
+              <th class="p-3">Actioned Comments</th>
+            </tr>
+          </thead>
+          <tbody id="reviewTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Progress overlay -->
+    <div id="progressPanel" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/30">
+      <div class="bg-white shadow-2xl rounded p-6 w-full max-w-lg"
+        style="position:absolute;left:50%;top:0;transform:translateX(-50%);margin-top:200px;">
+        <div class="text-lg font-semibold mb-2 overlay-title">Working…</div>
+
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="overallBar" class="h-3 bg-blue-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span>Overall</span>
+          <span><span id="etaDisplay" class="text-gray-400 mr-2"></span><span id="overallPct">0%</span></span>
+        </div>
+        <div id="progressStatus" class="text-sm text-gray-700 mt-4 mb-1">Subtask</div>
+        <div class="w-full bg-gray-200 rounded h-3 overflow-hidden">
+          <div id="subBar" class="h-3 bg-emerald-600" style="width: 0%"></div>
+        </div>
+        <div class="flex justify-between text-xs text-gray-600 mt-1">
+          <span id="progressDetail">Starting…</span>
+          <span id="subPct">0%</span>
+        </div>
+        <div id="apiUsage" class="text-xs text-gray-500 mt-4 mb-2"></div>
+      </div>
+    </div>
+
+    <!-- Modal for PR list -->
+    <div id="prModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40">
+      <div class="bg-white shadow-2xl rounded p-6 w-full max-w-2xl">
+        <div class="flex justify-between items-center mb-4">
+          <div class="text-lg font-semibold overlay-title" id="prModalTitle">Related Pull Requests</div>
+          <button id="prModalClose" class="text-gray-500 hover:text-gray-800 text-xl">&times;</button>
+        </div>
+        <div id="prModalContent" class="space-y-2 overflow-y-auto" style="max-height:60vh"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // ============================================================================
+    // Git Platform Abstraction Layer
+    // ============================================================================
+
+    /**
+     * Abstract base class for Git platform clients (GitHub, GitLab, etc.)
+     */
+    class GitPlatformClient {
+      constructor(token, options = {}) {
+        if (new.target === GitPlatformClient) {
+          throw new Error('GitPlatformClient is abstract and cannot be instantiated directly');
+        }
+        this.token = token;
+        this.recordingEnabled = options.recordingEnabled || false;
+        this.recordings = [];
+        this.recordingMetadata = {
+          recordedAt: new Date().toISOString(),
+          repositories: [],
+          dateFrom: null,
+          dateTo: null
+        };
+      }
+
+      recordRequest(method, url, requestData, responseData, headers) {
+        if (!this.recordingEnabled) return;
+        
+        this.recordings.push({
+          timestamp: new Date().toISOString(),
+          method,
+          url,
+          request: requestData,
+          response: responseData,
+          headers: headers ? Object.fromEntries(headers.entries()) : {}
+        });
+      }
+
+      getRecordings() {
+        return this.recordings;
+      }
+
+      setRecordingMetadata(repos, dateFrom, dateTo) {
+        this.recordingMetadata.repositories = Array.isArray(repos) ? repos : repos.split(',').map(s => s.trim()).filter(Boolean);
+        this.recordingMetadata.dateFrom = dateFrom;
+        this.recordingMetadata.dateTo = dateTo;
+      }
+
+      setComputedResults(rows) {
+        this.recordingMetadata.computedResults = rows;
+      }
+
+      downloadRecordings(filename = 'api-recordings.json') {
+        if (this.recordings.length === 0) {
+          console.warn('No recordings to download');
+          return;
+        }
+
+        const recordingData = {
+          metadata: this.recordingMetadata,
+          recordings: this.recordings
+        };
+
+        const dataStr = JSON.stringify(recordingData, null, 2);
+        const dataBlob = new Blob([dataStr], { type: 'application/json' });
+        const url = URL.createObjectURL(dataBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+
+      async getUserRepositories(options) {
+        throw new Error('getUserRepositories() must be implemented');
+      }
+
+      async getPullRequests(repo, options) {
+        throw new Error('getPullRequests() must be implemented');
+      }
+
+      async getReviews(repo, prNumber) {
+        throw new Error('getReviews() must be implemented');
+      }
+
+      async getReviewComments(repo, prNumber) {
+        throw new Error('getReviewComments() must be implemented');
+      }
+
+      async getIssueComments(repo, prNumber) {
+        throw new Error('getIssueComments() must be implemented');
+      }
+
+      async getPullRequestFiles(repo, prNumber, options) {
+        throw new Error('getPullRequestFiles() must be implemented');
+      }
+
+      async getCommits(commitsUrl) {
+        throw new Error('getCommits() must be implemented');
+      }
+    }
+
+    /**
+     * GitHub implementation of the Git platform client
+     */
+    class GitHubClient extends GitPlatformClient {
+      constructor(token, options = {}) {
+        super(token, options);
+        this.baseUrl = 'https://api.github.com';
+        this.headers = {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+        };
+      }
+
+      async getUserRepositories(options = {}) {
+        const { visibility = 'private', perPage = 100, page = 1 } = options;
+        const url = new URL(`${this.baseUrl}/user/repos`);
+        url.searchParams.set('visibility', visibility);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+
+        const response = await fetch(url, { headers: this.headers });
+        
+        if (!response.ok) {
+          throw new Error(`API error (repos): ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        this.recordRequest('GET', url.toString(), { visibility, perPage, page }, data, response.headers);
+        return { data, response };
+      }
+
+      async getPullRequests(repo, options = {}) {
+        const { state = 'all', perPage = 100, page = 1, sort = 'created', direction = 'desc' } = options;
+        const url = new URL(`${this.baseUrl}/repos/${repo}/pulls`);
+        url.searchParams.set('state', state);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+        url.searchParams.set('sort', sort);
+        url.searchParams.set('direction', direction);
+
+        const response = await fetch(url, { headers: this.headers });
+        
+        if (!response.ok) {
+          throw new Error(`API error for ${repo}: ${response.status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        this.recordRequest('GET', url.toString(), { repo, state, perPage, page }, data, response.headers);
+        return { data, response };
+      }
+
+      async _fetchPaginated(baseUrl, recordParams) {
+        // Fetch all pages of a GitHub API list endpoint (per_page=100).
+        // Returns { data: <combined array>, response: <last page's response> }.
+        const perPage = 100;
+        const aggregated = [];
+        let page = 1;
+        let lastResponse = null;
+        while (true) {
+          const url = new URL(baseUrl);
+          url.searchParams.set('per_page', perPage);
+          url.searchParams.set('page', page);
+          const response = await fetch(url.toString(), { headers: this.headers });
+          lastResponse = response;
+          if (!response.ok) {
+            this.recordRequest('GET', url.toString(), { ...recordParams, perPage, page }, { error: response.statusText }, response.headers);
+            return { data: aggregated, response };
+          }
+          const pageData = await response.json();
+          this.recordRequest('GET', url.toString(), { ...recordParams, perPage, page }, pageData, response.headers);
+          if (Array.isArray(pageData) && pageData.length) {
+            aggregated.push(...pageData);
+          }
+          if (!Array.isArray(pageData) || pageData.length < perPage) break;
+          page++;
+        }
+        return { data: aggregated, response: lastResponse };
+      }
+
+      async getReviews(repo, prNumber) {
+        return this._fetchPaginated(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/reviews`, { repo, prNumber });
+      }
+
+      async getReviewComments(repo, prNumber) {
+        return this._fetchPaginated(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/comments`, { repo, prNumber });
+      }
+
+      async getIssueComments(repo, prNumber) {
+        return this._fetchPaginated(`${this.baseUrl}/repos/${repo}/issues/${prNumber}/comments`, { repo, prNumber });
+      }
+
+      async getPullRequestFiles(repo, prNumber, options = {}) {
+        const { perPage = 100, page = 1 } = options;
+        const url = new URL(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/files`);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+
+        const response = await fetch(url, { headers: this.headers });
+        
+        if (!response.ok) {
+          console.warn(`Failed to fetch files for PR ${prNumber} (page ${page}): ${response.status} ${response.statusText}`);
+          this.recordRequest('GET', url.toString(), { repo, prNumber, perPage, page }, { error: response.statusText }, response.headers);
+          return { data: null, response };
+        }
+        
+        const data = await response.json();
+        this.recordRequest('GET', url.toString(), { repo, prNumber, perPage, page }, data, response.headers);
+        return { data, response };
+      }
+
+      async getCommits(commitsUrl) {
+        const response = await fetch(commitsUrl, { headers: this.headers });
+        
+        if (!response.ok) {
+          this.recordRequest('GET', commitsUrl, {}, { error: response.statusText }, response.headers);
+          return { data: null, response };
+        }
+        
+        const data = await response.json();
+        this.recordRequest('GET', commitsUrl, {}, data, response.headers);
+        return { data, response };
+      }
+
+      parseLastPage(linkHeader) {
+        if (!linkHeader) return null;
+        const parts = linkHeader.split(',');
+        for (const part of parts) {
+          const [urlPart, relPart] = part.split(';');
+          if (relPart && relPart.includes('rel="last"')) {
+            const m = urlPart.match(/[?&]page=(\d+)/);
+            if (m) return parseInt(m[1], 10);
+          }
+        }
+        return null;
+      }
+    }
+
+    /**
+     * Playback GitHub client - replays requests from a recorded file
+     */
+    class PlaybackGitHubClient extends GitHubClient {
+      constructor(token, recordingsOrData, options = {}) {
+        super(token, options);
+        
+        // Support both old format (array) and new format (object with metadata)
+        let recordings, metadata;
+        if (Array.isArray(recordingsOrData)) {
+          recordings = recordingsOrData;
+          metadata = null;
+        } else {
+          recordings = recordingsOrData.recordings || [];
+          metadata = recordingsOrData.metadata || null;
+        }
+        
+        this.playbackRecordings = recordings;
+        this.playbackMetadata = metadata;
+        this.playbackIndex = new Map();
+        
+        // Index recordings by method + URL for fast lookup
+        recordings.forEach((recording, idx) => {
+          const key = `${recording.method}|${recording.url}`;
+          if (!this.playbackIndex.has(key)) {
+            this.playbackIndex.set(key, []);
+          }
+          this.playbackIndex.get(key).push(idx);
+        });
+        
+        this.usedRecordings = new Set();
+        
+        // Log metadata if available
+        if (metadata) {
+          console.log('📋 Playback session metadata:');
+          console.log(`   Recorded: ${metadata.recordedAt}`);
+          console.log(`   Repositories: ${metadata.repositories.join(', ')}`);
+          console.log(`   Date range: ${metadata.dateFrom || 'N/A'} to ${metadata.dateTo || 'N/A'}`);
+        }
+      }
+
+      async getUserRepositories(options = {}) {
+        const { visibility = 'private', perPage = 100, page = 1 } = options;
+        const url = new URL(`${this.baseUrl}/user/repos`);
+        url.searchParams.set('visibility', visibility);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+
+        const recording = this._findRecording('GET', url.toString());
+        if (!recording) {
+          throw new Error(`No recorded response found for GET ${url.toString()}`);
+        }
+        
+        const mockResponse = this._createMockResponse(recording);
+        return { data: recording.response, response: mockResponse };
+      }
+
+      async getPullRequests(repo, options = {}) {
+        const { state = 'all', perPage = 100, page = 1, sort = 'created', direction = 'desc' } = options;
+        const url = new URL(`${this.baseUrl}/repos/${repo}/pulls`);
+        url.searchParams.set('state', state);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+        url.searchParams.set('sort', sort);
+        url.searchParams.set('direction', direction);
+
+        const recording = this._findRecording('GET', url.toString());
+        if (!recording) {
+          throw new Error(`No recorded response found for GET ${url.toString()}`);
+        }
+        
+        const mockResponse = this._createMockResponse(recording);
+        return { data: recording.response, response: mockResponse };
+      }
+
+      _replayPaginated(baseUrl) {
+        // Try paginated URLs (per_page=100&page=N) first, falling back to the
+        // legacy non-paginated URL for older recordings.
+        const perPage = 100;
+        const aggregated = [];
+        let lastRecording = null;
+        let page = 1;
+        while (true) {
+          const url = new URL(baseUrl);
+          url.searchParams.set('per_page', perPage);
+          url.searchParams.set('page', page);
+          const recording = this._findRecording('GET', url.toString());
+          if (!recording) break;
+          lastRecording = recording;
+          const pageData = recording.response;
+          if (Array.isArray(pageData) && pageData.length) {
+            aggregated.push(...pageData);
+          }
+          if (!Array.isArray(pageData) || pageData.length < perPage) {
+            const mockResponse = this._createMockResponse(recording);
+            return { data: aggregated, response: mockResponse };
+          }
+          page++;
+        }
+        // Fallback: legacy recording without query params
+        const legacy = this._findRecording('GET', baseUrl);
+        if (legacy) {
+          const mockResponse = this._createMockResponse(legacy);
+          return { data: legacy.response, response: mockResponse };
+        }
+        if (lastRecording) {
+          const mockResponse = this._createMockResponse(lastRecording);
+          return { data: aggregated, response: mockResponse };
+        }
+        throw new Error(`No recorded response found for GET ${baseUrl}`);
+      }
+
+      async getReviews(repo, prNumber) {
+        return this._replayPaginated(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/reviews`);
+      }
+
+      async getReviewComments(repo, prNumber) {
+        return this._replayPaginated(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/comments`);
+      }
+
+      async getIssueComments(repo, prNumber) {
+        return this._replayPaginated(`${this.baseUrl}/repos/${repo}/issues/${prNumber}/comments`);
+      }
+
+      async getPullRequestFiles(repo, prNumber, options = {}) {
+        const { perPage = 100, page = 1 } = options;
+        const url = new URL(`${this.baseUrl}/repos/${repo}/pulls/${prNumber}/files`);
+        url.searchParams.set('per_page', perPage);
+        url.searchParams.set('page', page);
+
+        const recording = this._findRecording('GET', url.toString());
+        
+        if (!recording) {
+          console.warn(`No recorded response found for GET ${url.toString()}`);
+          const mockResponse = this._createMockResponse({ headers: {} });
+          return { data: null, response: mockResponse };
+        }
+        
+        const mockResponse = this._createMockResponse(recording);
+        return { data: recording.response, response: mockResponse };
+      }
+
+      async getCommits(commitsUrl) {
+        const recording = this._findRecording('GET', commitsUrl);
+        
+        if (!recording) {
+          console.warn(`No recorded response found for GET ${commitsUrl}`);
+          const mockResponse = this._createMockResponse({ headers: {} });
+          return { data: null, response: mockResponse };
+        }
+        
+        const mockResponse = this._createMockResponse(recording);
+        return { data: recording.response, response: mockResponse };
+      }
+
+      _findRecording(method, url) {
+        const key = `${method}|${url}`;
+        const indices = this.playbackIndex.get(key);
+        
+        if (!indices || indices.length === 0) {
+          return null;
+        }
+        
+        // Find first unused recording for this URL
+        for (const idx of indices) {
+          if (!this.usedRecordings.has(idx)) {
+            this.usedRecordings.add(idx);
+            return this.playbackRecordings[idx];
+          }
+        }
+        
+        // If all used, return the last one (for repeated requests)
+        return this.playbackRecordings[indices[indices.length - 1]];
+      }
+
+      _createMockResponse(recording) {
+        const headers = new Map();
+        if (recording.headers) {
+          Object.entries(recording.headers).forEach(([key, value]) => {
+            headers.set(key.toLowerCase(), value);
+          });
+        }
+        
+        return {
+          ok: !recording.response?.error,
+          status: recording.response?.error ? 404 : 200,
+          statusText: recording.response?.error || 'OK',
+          headers: {
+            get: (name) => headers.get(name.toLowerCase()) || null,
+            entries: () => headers.entries()
+          }
+        };
+      }
+    }
+
+    /**
+     * GitLab implementation (placeholder for future support)
+     */
+    class GitLabClient extends GitPlatformClient {
+      constructor(token, baseUrl = 'https://gitlab.com/api/v4') {
+        super(token);
+        this.baseUrl = baseUrl;
+        this.headers = {
+          'PRIVATE-TOKEN': token,
+          Accept: 'application/json',
+        };
+      }
+
+      async getUserRepositories(options = {}) {
+        // GitLab uses /projects endpoint with membership=true
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getPullRequests(repo, options = {}) {
+        // GitLab uses /projects/:id/merge_requests
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getReviews(repo, prNumber) {
+        // GitLab uses approvals endpoint
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getReviewComments(repo, prNumber) {
+        // GitLab uses /merge_requests/:id/notes
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getIssueComments(repo, prNumber) {
+        // GitLab uses /merge_requests/:id/notes (same endpoint)
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getPullRequestFiles(repo, prNumber, options = {}) {
+        // GitLab uses /merge_requests/:id/changes
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getCommits(commitsUrl) {
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      parseLastPage(linkHeader) {
+        // GitLab also uses Link headers, but format might differ
+        throw new Error('GitLab implementation not yet available');
+      }
+    }
+
+    // ============================================================================
+    // Application Code
+    // ============================================================================
+
+    // Default date logic: if empty, dateTo = today; dateFrom = first of current month if today > 15th, else first of previous month
+    document.addEventListener('DOMContentLoaded', () => {
+      const fromEl = document.getElementById('dateFrom');
+      const toEl = document.getElementById('dateTo');
+      if (fromEl && toEl && !fromEl.value && !toEl.value) {
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        // dateTo -> today
+        toEl.value = `${yyyy}-${mm}-${dd}`;
+        // Compute dateFrom
+        let fromDate;
+        if (today.getDate() > 15) {
+          fromDate = new Date(yyyy, today.getMonth(), 1);
+        } else {
+          // previous month
+          const prevMonth = new Date(yyyy, today.getMonth() - 1, 1);
+          fromDate = prevMonth;
+        }
+        const fyyyy = fromDate.getFullYear();
+        const fmm = String(fromDate.getMonth() + 1).padStart(2, '0');
+        const fdd = '01';
+        fromEl.value = `${fyyyy}-${fmm}-${fdd}`;
+      }
+    });
+    async function fetchAllPRs(client, reposArray, progress, totals, updateOverall, dateFrom = null) {
+      let prs = [];
+      const fromDate = dateFrom ? new Date(dateFrom) : null;
+
+      for (let i = 0; i < reposArray.length; i++) {
+        const repo = reposArray[i];
+        let page = 1;
+        let repoLastPage = null;
+        let repoFetchedPages = 0;
+        while (true) {
+          progress?.setDetail(`Repo ${i + 1}/${reposArray.length}: ${repo} — page ${page}${repoLastPage ? " of " + repoLastPage : ""}`);
+          const { data, response } = await client.getPullRequests(repo, { state: 'all', perPage: 100, page, sort: 'created', direction: 'desc' });
+          progress?.incApiUsage(response);
+          
+          if (page === 1) {
+            const last = client.parseLastPage(response.headers.get("Link"));
+            if (last) {
+              repoLastPage = last;
+              totals.totalPages += last;
+            } else {
+              totals.totalPages += 1;
+            }
+          }
+          
+          for (const pr of data) pr._repo = repo;
+          
+          prs = prs.concat(data);
+          repoFetchedPages++;
+          totals.fetchedPages++;
+          progress?.setSub(repoFetchedPages, repoLastPage ?? repoFetchedPages);
+          if (typeof updateOverall === "function") updateOverall();
+
+          if (data.length < 100) break;
+          
+          // Early exit optimization: if all PRs on this page are before dateFrom, stop fetching
+          if (fromDate && data.length > 0) {
+            const allBeforeDate = data.every(pr => new Date(pr.created_at) < fromDate);
+            if (allBeforeDate) {
+              console.log(`⚡ Early stop for ${repo}: all PRs on page ${page} are before ${dateFrom}`);
+              break;
+            }
+          }
+          
+          if (!repoLastPage) totals.totalPages += 1;
+          page++;
+        }
+      }
+      return prs;
+    }
+
+    async function fetchPRReviewsAndComments(client, prs, progress, totals, updateOverall, dateFrom = null, dateTo = null) {
+      const approvedSet = new Set();
+      const reviewsDoneByUserMonth = {};
+      const logicalReviewsByUserMonth = {};
+      const commentsByUserMonth = {};
+      const reviewTimeByUserMonth = {};
+      const prMapByUserMonth = {};
+      const approvedMapByUserMonth = {};
+      const mergedMapByUserMonth = {};
+      const reviewedMapByUserMonth = {};
+      const actionedCommentsByUserMonth = {}; // NEW
+      const prsReviewedByUserMonth = {}; // distinct PRs a user reviewed/commented on (per month)
+      
+      // Track optimization savings
+      let skippedFiles = 0;
+      
+      // Parse date range for comment filtering
+      const fromDate = dateFrom ? new Date(dateFrom) : null;
+      const toDate = dateTo ? new Date(dateTo) : null;
+
+      // Debug: Log date range at the start
+      if (prs.length > 0) {
+        console.log(`📅 Date range for analysis: FROM ${fromDate?.toISOString() || 'beginning'} TO ${toDate?.toISOString() || 'now'}`);
+      }
+
+      for (let idx = 0; idx < prs.length; idx++) {
+        const pr = prs[idx];
+        // Fetch reviews
+        const { data: reviews, response: reviewsResp } = await client.getReviews(pr._repo, pr.number);
+        progress?.incApiUsage(reviewsResp);
+        pr._reviews = reviews;
+        
+        // Fetch inline code review comments
+        const { data: reviewComments, response: commentsResp } = await client.getReviewComments(pr._repo, pr.number);
+        progress?.incApiUsage(commentsResp);
+        pr._reviewComments = reviewComments;
+        
+        // Fetch general issue comments (PR conversation comments)
+        const { data: issueComments, response: issueCommentsResp } = await client.getIssueComments(pr._repo, pr.number);
+        progress?.incApiUsage(issueCommentsResp);
+        pr._issueComments = issueComments;
+
+        // Build changed line set (final merged state) for actioned detection
+        let changedLines = new Set();
+        const needsFiles = pr.merged_at || reviewComments.length > 0;
+        
+        // Only fetch files if: 1) merged (for line counts shown in UI), OR 2) has review comments (for actioned detection)
+        if (needsFiles) {
+          let totalChanged = 0;
+          const needsPatchAnalysis = reviewComments.length > 0 && pr.merged_at; // Only parse patches if we need actioned detection
+          
+          try {
+            let page = 1;
+            while (true) {
+              const { data: files, response: filesResp } = await client.getPullRequestFiles(pr._repo, pr.number, { perPage: 100, page });
+              progress?.incApiUsage(filesResp);
+              
+              if (!files || files.length === 0) break;
+
+              for (const file of files) {
+                const fileChanges = (file.changes != null) ? file.changes : 0;
+                totalChanged += fileChanges;
+                
+                // Only parse patch for actioned comment detection if needed
+                if (needsPatchAnalysis && file.patch) {
+                  const lines = file.patch.split("\n");
+                  let newLine = 0;
+                  for (const line of lines) {
+                    if (line.startsWith("@@")) {
+                      const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+                      if (m) newLine = parseInt(m[1], 10) - 1;
+                    } else if (line.startsWith("+")) {
+                      changedLines.add(newLine);
+                      newLine++;
+                    } else if (line.startsWith("-")) {
+                      // deletion does not increment newLine
+                    } else {
+                      newLine++;
+                    }
+                  }
+                }
+              }
+              if (files.length < 100) break;
+              page++;
+              // Small delay to be nice to the API
+              await new Promise(r => setTimeout(r, 50));
+            }
+          } catch (e) {
+            console.error(`Error fetching files for PR ${pr.number}:`, e);
+          }
+          pr._linesChanged = totalChanged;
+        } else {
+          pr._linesChanged = 0;
+          skippedFiles++;
+        }
+
+        if (reviews.some(r => r.state === "APPROVED")) approvedSet.add(`${pr._repo}#${pr.number}`);
+        const prMonth = pr.created_at.slice(0, 7);
+
+        // Group reviews by user
+        const reviewsByUser = {};
+        for (const r of reviews) {
+          if (r.user?.login && r.user.login !== pr.user?.login) {
+            (reviewsByUser[r.user.login] = reviewsByUser[r.user.login] || []).push(r);
+          }
+        }
+        // Group comments by user
+        const commentsByUser = {};
+        // Add review comments (inline code comments)
+        for (const c of reviewComments) {
+          if (c.user?.login) (commentsByUser[c.user.login] = commentsByUser[c.user.login] || []).push(c);
+        }
+        // Add issue comments (general PR discussion comments)
+        for (const c of issueComments) {
+          if (c.user?.login) (commentsByUser[c.user.login] = commentsByUser[c.user.login] || []).push(c);
+        }
+
+        // Build set of all reviewers (those who submitted reviews OR left comments, excluding PR author)
+        const allReviewers = new Set([
+          ...Object.keys(reviewsByUser),
+          ...Object.keys(commentsByUser).filter(user => user !== pr.user?.login)
+        ]);
+
+        // Track that each reviewer touched this PR (for per-PR averages)
+        const prKey = `${pr._repo}#${pr.number}`;
+        for (const reviewer of allReviewers) {
+          prsReviewedByUserMonth[reviewer] = prsReviewedByUserMonth[reviewer] || {};
+          prsReviewedByUserMonth[reviewer][prMonth] = prsReviewedByUserMonth[reviewer][prMonth] || new Set();
+          prsReviewedByUserMonth[reviewer][prMonth].add(prKey);
+        }
+
+        // Build logical review groups per reviewer
+        for (const reviewer of allReviewers) {
+          const userReviews = (reviewsByUser[reviewer] || []).slice().sort((a, b) => new Date(a.submitted_at) - new Date(b.submitted_at));
+          let groups = []; let group = []; let lastTime = null;
+          for (const rev of userReviews) {
+            const t = new Date(rev.submitted_at);
+            if (!lastTime || (t - lastTime) > 20 * 60 * 1000) { if (group.length) groups.push(group); group = [rev]; } else group.push(rev); lastTime = t;
+          }
+          if (group.length) groups.push(group);
+
+          logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {};
+          commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {};
+          reviewTimeByUserMonth[reviewer] = reviewTimeByUserMonth[reviewer] || {};
+          actionedCommentsByUserMonth[reviewer] = actionedCommentsByUserMonth[reviewer] || {};
+          logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + groups.length;
+          commentsByUserMonth[reviewer][prMonth] = commentsByUserMonth[reviewer][prMonth] || 0;
+          reviewTimeByUserMonth[reviewer][prMonth] = reviewTimeByUserMonth[reviewer][prMonth] || 0;
+          actionedCommentsByUserMonth[reviewer][prMonth] = actionedCommentsByUserMonth[reviewer][prMonth] || 0;
+
+          // Count ALL comments by this reviewer within the date range (not just in review windows)
+          let totalComments = 0;
+          let totalActioned = 0;
+          if (commentsByUser[reviewer]) {
+            for (const c of commentsByUser[reviewer]) {
+              const ct = new Date(c.created_at);
+              // Check if comment falls within analysis date range
+              const inDateRange = (!fromDate || ct >= fromDate) && (!toDate || ct <= toDate);
+              
+              // Debug: Log first few comments and why they're filtered
+              if (idx === 0 && totalComments === 0) {
+                console.log(`PR #${pr.number}, Reviewer: ${reviewer}`);
+                console.log(`  Comment date: ${ct.toISOString()}, dateFrom: ${fromDate?.toISOString() || 'none'}, dateTo: ${toDate?.toISOString() || 'none'}`);
+                console.log(`  In date range: ${inDateRange}`);
+              }
+              
+              if (inDateRange) {
+                totalComments++;
+                // Check if comment was actioned (for merged PRs only)
+                if (pr.merged_at && c.position != null && changedLines.size) {
+                  for (let ln = c.position - 10; ln <= c.position + 10; ln++) {
+                    if (changedLines.has(ln)) { totalActioned++; c._actioned = true; break; }
+                  }
+                }
+              }
+            }
+          }
+          
+          // Count review body comments within date range
+          for (const rev of userReviews) {
+            const rt = new Date(rev.submitted_at);
+            const inDateRange = (!fromDate || rt >= fromDate) && (!toDate || rt <= toDate);
+            if (inDateRange && rev.body && rev.body.trim()) {
+              totalComments++;
+            }
+          }
+          
+          commentsByUserMonth[reviewer][prMonth] += totalComments;
+          actionedCommentsByUserMonth[reviewer][prMonth] += totalActioned;
+
+          for (const g of groups) {
+            let commentTimes = []; let commentCount = 0;
+            let windowStart, windowEnd;
+            if (g.length === 1) { windowStart = windowEnd = new Date(g[0].submitted_at); }
+            else { windowStart = new Date(g[0].submitted_at); windowEnd = new Date(g[g.length - 1].submitted_at); }
+
+            // Collect comment times within this review window for time estimation only
+            if (commentsByUser[reviewer]) {
+              for (const c of commentsByUser[reviewer]) {
+                const ct = new Date(c.created_at);
+                if (windowStart && windowEnd && ct >= windowStart && ct <= windowEnd) {
+                  commentTimes.push(ct);
+                }
+              }
+            }
+            for (const rv of g) { if (rv.body && rv.body.trim()) { commentTimes.push(new Date(rv.submitted_at)); } }
+            
+            // Calculate review duration based on comment spread
+            let durationMin, reviewWindowStart;
+            if (commentTimes.length === 0) { durationMin = 3; reviewWindowStart = new Date(windowStart - 3 * 60000); }
+            else if (commentTimes.length === 1) { durationMin = 5; reviewWindowStart = new Date(commentTimes[0] - 5 * 60000); }
+            else { const minT = Math.min(...commentTimes.map(d => d.getTime())); const maxT = Math.max(...commentTimes.map(d => d.getTime())); durationMin = 5 + (maxT - minT) / 60000; reviewWindowStart = new Date(minT - 5 * 60000); }
+            reviewTimeByUserMonth[reviewer][prMonth] += durationMin;
+            (pr._reviewWindows = pr._reviewWindows || []).push({ reviewer, group: g, reviewWindowStart, reviewDurationMin: durationMin, groupStart: windowStart, groupEnd: windowEnd });
+          }
+          reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {};
+          reviewsDoneByUserMonth[reviewer][prMonth] = logicalReviewsByUserMonth[reviewer][prMonth];
+        }
+
+        // Submitter mappings
+        const submitter = pr.user?.login || "unknown";
+        (prMapByUserMonth[submitter] = prMapByUserMonth[submitter] || {});
+        (prMapByUserMonth[submitter][prMonth] = prMapByUserMonth[submitter][prMonth] || []).push(pr);
+        if (reviews.some(r => r.state === "APPROVED")) {
+          (approvedMapByUserMonth[submitter] = approvedMapByUserMonth[submitter] || {});
+          (approvedMapByUserMonth[submitter][prMonth] = approvedMapByUserMonth[submitter][prMonth] || []).push(pr);
+        }
+        if (pr.merged_at) {
+          (mergedMapByUserMonth[submitter] = mergedMapByUserMonth[submitter] || {});
+          (mergedMapByUserMonth[submitter][prMonth] = mergedMapByUserMonth[submitter][prMonth] || []).push(pr);
+        }
+        for (const r of reviews) {
+          if (r.user?.login && r.user.login !== submitter) {
+            (reviewedMapByUserMonth[r.user.login] = reviewedMapByUserMonth[r.user.login] || {});
+            (reviewedMapByUserMonth[r.user.login][prMonth] = reviewedMapByUserMonth[r.user.login][prMonth] || []).push({ pr, review: r });
+          }
+        }
+        totals.fetchedReviews++;
+        progress?.setDetail(`${Math.min(totals.fetchedReviews, totals.totalReviews)} of ${totals.totalReviews} reviews fetched`);
+        progress?.setSub(totals.fetchedReviews, totals.totalReviews);
+        updateOverall?.();
+      }
+
+      // Log optimization savings
+      if (skippedFiles > 0) {
+        console.log(`⚡ API optimization savings:`);
+        console.log(`   Skipped ${skippedFiles} file requests (unmerged PRs with no review comments)`);
+      }
+
+      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, reviewTimeByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth, prsReviewedByUserMonth };
+    }
+
+    function filterPRsByDate(prs, dateFrom, dateTo) {
+      if (!dateFrom && !dateTo) return prs;
+      const from = dateFrom ? new Date(dateFrom) : null;
+      const to = dateTo ? new Date(dateTo) : null;
+      return prs.filter(pr => {
+        const created = new Date(pr.created_at);
+        if (from && created < from) return false;
+        if (to && created > to) return false;
+        return true;
+      });
+    }
+
+    async function aggregateStats(prs, approvedSet, progress, startPct, endPct) {
+      const grouped = {};
+      progress?.setStatus("Aggregating stats…");
+
+      progress?.setOverallScaled(0, prs.length, startPct, endPct);
+
+      for (let i = 0; i < prs.length; i++) {
+        if (i % 100 === 0) {
+          progress?.setSub(i, prs.length);
+          progress?.setOverallScaled(i, prs.length, startPct, endPct);
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const pr = prs[i];
+        const user = pr.user?.login || "unknown";
+        const month = pr.created_at.slice(0, 7);
+        if (!grouped[user]) grouped[user] = {};
+        if (!grouped[user][month]) grouped[user][month] = { count: 0, approved: 0, merged: 0 };
+        grouped[user][month].count++;
+        if (approvedSet.has(`${pr._repo}#${pr.number}`)) {
+          grouped[user][month].approved++;
+        }
+        if (pr.merged_at) {
+          grouped[user][month].merged++;
+        }
+      }
+      return grouped;
+    }
+
+    async function flattenStats(
+      grouped,
+      logicalReviewsByUserMonth,
+      commentsByUserMonth,
+      reviewTimeByUserMonth,
+      prMapByUserMonth,
+      approvedMapByUserMonth,
+      mergedMapByUserMonth,
+      reviewedMapByUserMonth,
+      actionedCommentsByUserMonth,
+      prsReviewedByUserMonth,
+      progress,
+      startPct,
+      endPct
+    ) {
+      const rows = [];
+      const allUsers = new Set([...Object.keys(grouped), ...Object.keys(logicalReviewsByUserMonth)]);
+      const allUsersArray = Array.from(allUsers).sort();
+
+      progress?.setStatus("Flattening stats…");
+
+      progress?.setOverallScaled(0, allUsersArray.length, startPct, endPct);
+
+      for (let i = 0; i < allUsersArray.length; i++) {
+        if (i % 20 === 0) {
+          progress?.setSub(i, allUsersArray.length);
+          progress?.setOverallScaled(i, allUsersArray.length, startPct, endPct);
+          await new Promise(r => setTimeout(r, 0));
+        }
+        const user = allUsersArray[i];
+        const months = new Set([
+          ...(grouped[user] ? Object.keys(grouped[user]) : []),
+          ...(logicalReviewsByUserMonth[user] ? Object.keys(logicalReviewsByUserMonth[user]) : [])
+        ]);
+        for (const m of Array.from(months).sort()) {
+          const mergedList = mergedMapByUserMonth[user]?.[m] || [];
+          let totalMergeTime = 0, mergedCount = 0;
+          for (const pr of mergedList) {
+            if (pr.created_at && pr.merged_at) {
+              totalMergeTime += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
+              mergedCount++;
+            }
+          }
+          const avgMergeTime = mergedCount ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
+          const logicalReviews = logicalReviewsByUserMonth[user]?.[m] || 0;
+          const comments = commentsByUserMonth[user]?.[m] || 0;
+          const actioned = actionedCommentsByUserMonth?.[user]?.[m] || 0;
+          const totalReviewTime = reviewTimeByUserMonth[user]?.[m] || 0;
+          const prsReviewed = prsReviewedByUserMonth?.[user]?.[m]?.size || 0;
+          const avgActioned = comments ? Math.round((actioned / comments) * 100) + "%" : "—";
+          rows.push({
+            user,
+            month: m,
+            count: grouped[user]?.[m]?.count || 0,
+            approved: grouped[user]?.[m]?.approved || 0,
+            merged: grouped[user]?.[m]?.merged || 0,
+            avgMergeTime,
+            prList: prMapByUserMonth[user]?.[m] || [],
+            approvedList: approvedMapByUserMonth[user]?.[m] || [],
+            mergedList,
+            updateCounts: mergedList.map(pr => pr._updateCount),
+            reviewed: logicalReviews,
+            prsReviewed,
+            avgCommentsPerReview: prsReviewed ? (comments / prsReviewed).toFixed(2) : "0.00",
+            avgReviewTime: prsReviewed ? (totalReviewTime / prsReviewed).toFixed(2) : "0.00",
+            reviewedList: reviewedMapByUserMonth[user]?.[m] || [],
+            actionedCount: actioned,
+            totalComments: comments,
+            actionedPct: avgActioned
+          });
+        }
+      }
+      return rows;
+    }
+
+    // Add this helper function before getPRStats
+    async function fetchUpdateCountsForMergedPRs(client, prs, progress, startPct, endPct) {
+      progress?.setStatus("Fetching update counts…");
+
+      progress?.setOverallScaled(0, prs.length, startPct, endPct);
+
+      for (let i = 0; i < prs.length; i++) {
+        const pr = prs[i];
+        if (i % 10 === 0) {
+          progress?.setSub(i, prs.length);
+          progress?.setOverallScaled(i, prs.length, startPct, endPct);
+          // Yield occasionally
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        if (pr.merged_at && pr.commits_url) {
+          try {
+            const { data: commits, response } = await client.getCommits(pr.commits_url);
+            progress?.incApiUsage(response);
+            if (commits) {
+              const created = new Date(pr.created_at);
+              const merged = new Date(pr.merged_at);
+              pr._updateCount = commits.filter(c => {
+                const cDate = new Date(c.commit.committer.date);
+                return cDate > created && cDate < merged;
+              }).length;
+            } else {
+              pr._updateCount = null;
+            }
+          } catch {
+            pr._updateCount = null;
+          }
+        }
+      }
+    }
+
+    async function getPRStats(client, repos, { dateFrom, dateTo } = {}, progress) {
+      
+      const reposArray = Array.isArray(repos)
+        ? repos
+        : String(repos).split(",").map(s => s.trim()).filter(Boolean);
+      const totals = { totalPages: 0, fetchedPages: 0, totalReviews: 0, fetchedReviews: 0 };
+      function updatePRProgress() {
+        const denomPages = Math.max(totals.totalPages, totals.fetchedPages);
+        const done = totals.fetchedPages;
+        const total = denomPages || 1;
+        // Scale PR fetching phase to 0-40%
+        progress?.setOverallScaled(done, total, 0, 40);
+      }
+
+      function updateReviewProgress() {
+        const denomReviews = Math.max(totals.totalReviews, totals.fetchedReviews);
+        const done = totals.fetchedReviews;
+        const total = denomReviews || 1;
+        // Scale Review fetching phase to 40-90%
+        progress?.setOverallScaled(done, total, 40, 90);
+      }
+
+      progress?.setStatus("Fetching pull request lists…");
+
+
+      let prs = await fetchAllPRs(client, reposArray, progress, totals, updatePRProgress, dateFrom);
+      prs = filterPRsByDate(prs, dateFrom, dateTo);
+
+      progress?.setStatus("Fetching reviews…");
+
+      progress?.setDetail(`0 of ${prs.length} reviews fetched`);
+      totals.totalReviews = prs.length;
+      progress?.setSub(0, totals.totalReviews);
+      updateReviewProgress();
+
+      // Pass updateReviewProgress and totals to fetchPRReviewsAndComments
+      const reviewStats = await fetchPRReviewsAndComments(client, prs, progress, totals, updateReviewProgress, dateFrom, dateTo);
+
+      // Fetch update counts for merged PRs (90-98%)
+      await fetchUpdateCountsForMergedPRs(client, prs, progress, 90, 98);
+
+      // Aggregate stats (98-99%)
+      const grouped = await aggregateStats(prs, reviewStats.approvedSet, progress, 98, 99);
+
+      // Flatten stats (99-100%)
+      const rows = await flattenStats(
+        grouped,
+        reviewStats.logicalReviewsByUserMonth,
+        reviewStats.commentsByUserMonth,
+        reviewStats.reviewTimeByUserMonth,
+        reviewStats.prMapByUserMonth,
+        reviewStats.approvedMapByUserMonth,
+        reviewStats.mergedMapByUserMonth,
+        reviewStats.reviewedMapByUserMonth,
+        reviewStats.actionedCommentsByUserMonth,
+        reviewStats.prsReviewedByUserMonth,
+        progress,
+        99, 100
+      );
+      return rows;
+    }
+
+
+
+    // Progress UI helpers
+    function createProgressUI() {
+      const panel = document.getElementById("progressPanel");
+      const overallBar = document.getElementById("overallBar");
+      const overallPct = document.getElementById("overallPct");
+      const subBar = document.getElementById("subBar");
+      const subPct = document.getElementById("subPct");
+      const statusEl = document.getElementById("progressStatus");
+      const detailEl = document.getElementById("progressDetail");
+      const apiUsageEl = document.getElementById("apiUsage");
+      const etaEl = document.getElementById("etaDisplay");
+      let apiCount = 0;
+      let apiRemaining = null;
+      let startTime = null;
+      let lastPct = 0;
+
+      function updateEta(pct) {
+        lastPct = pct;
+        if (!startTime || pct <= 0) { etaEl.textContent = ""; return; }
+        const elapsed = (Date.now() - startTime) / 1000;
+        if (elapsed < 2 || pct < 3) { etaEl.textContent = "estimating…"; return; }
+        const totalEstimate = elapsed / (pct / 100);
+        const remaining = Math.max(0, totalEstimate - elapsed);
+        if (remaining < 60) {
+          etaEl.textContent = `~${Math.ceil(remaining)}s left`;
+        } else {
+          const mins = Math.floor(remaining / 60);
+          const secs = Math.ceil(remaining % 60);
+          etaEl.textContent = `~${mins}m ${secs}s left`;
+        }
+      }
+
+      function open() {
+        startTime = Date.now();
+        lastPct = 0;
+        etaEl.textContent = "";
+        panel.classList.remove("hidden");
+        panel.classList.add("flex");
+      }
+      function close() {
+        panel.classList.add("hidden");
+        panel.classList.remove("flex");
+      }
+      function setStatus(text) { statusEl.textContent = text; }
+      function setDetail(text) { detailEl.textContent = text; }
+
+      function setOverall(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        overallBar.style.width = pct + "%";
+        overallPct.textContent = pct + "%";
+        updateEta(pct);
+      }
+      function setSub(done, total) {
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        subBar.style.width = pct + "%";
+        subPct.textContent = pct + "%";
+      }
+      function setApiUsage(count, remaining) {
+        apiUsageEl.textContent = `API requests: ${count}${remaining !== null ? `, quota remaining: ${remaining}` : ""}`;
+      }
+      function incApiUsage(resp) {
+        apiCount++;
+        if (resp && resp.headers) {
+          const rem = resp.headers.get("X-RateLimit-Remaining");
+          if (rem !== null) {
+            const remaining = parseInt(rem, 10);
+            // Only update if we don't have a value yet, or if the new value is lower
+            // This prevents jumping around when async responses arrive out of order
+            if (apiRemaining === null || remaining < parseInt(apiRemaining, 10)) {
+              apiRemaining = remaining;
+            }
+          }
+        }
+        setApiUsage(apiCount, apiRemaining);
+      }
+      function resetApiUsage() {
+        apiCount = 0;
+        apiRemaining = null;
+        setApiUsage(apiCount, apiRemaining);
+      }
+      function setOverallScaled(done, total, startPct, endPct) {
+        const fraction = total > 0 ? done / total : 0;
+        const pct = Math.floor(startPct + fraction * (endPct - startPct));
+        overallBar.style.width = pct + "%";
+        overallPct.textContent = pct + "%";
+        updateEta(pct);
+      }
+      return { open, close, setStatus, setDetail, setOverall, setSub, setApiUsage, incApiUsage, resetApiUsage, setOverallScaled };
+    }
+
+    async function getAllPrivateRepos(client, progress) {
+      let repos = [];
+      let page = 1;
+      while (true) {
+        const { data, response } = await client.getUserRepositories({ visibility: 'private', perPage: 100, page });
+        progress?.incApiUsage(response);
+        repos = repos.concat(data);
+        if (data.length < 100) break;
+        page++;
+      }
+      // Return as ["owner/repo", ...]
+      return repos.map(r => r.full_name);
+    }
+
+    // Detect GitHub bot accounts
+    const BOT_LABEL = "bots";
+    const isBot = (name) => /\[bot\]$/i.test(name) || name === 'dependabot' || name === 'github-actions';
+
+    // Add showPRModal function before the form submit handler
+    function showPRModal(title, prArr, isReviewList) {
+      const modal = document.getElementById("prModal");
+      const modalTitle = document.getElementById("prModalTitle");
+      const modalContent = document.getElementById("prModalContent");
+      modalTitle.textContent = title;
+      modalContent.innerHTML = "";
+      if (!prArr || prArr.length === 0) {
+        modalContent.innerHTML = "<div class='text-gray-500'>No pull requests found.</div>";
+      } else if (isReviewList) {
+        // Check if this is a consolidated bots view
+        const isBotView = title.includes(BOT_LABEL);
+        // Use logical review windows if present
+        let windows = [];
+        prArr.forEach(item => {
+          const pr = item.pr;
+          const reviewer = item.review.user?.login || "unknown";
+          if (pr._reviewWindows) {
+            pr._reviewWindows.forEach(w => {
+              if (isBotView ? isBot(w.reviewer) : w.reviewer === reviewer) {
+                windows.push({ pr, reviewer: isBotView ? BOT_LABEL : w.reviewer, ...w });
+              }
+            });
+          }
+        });
+        // Remove duplicate windows
+        windows = windows.filter((w, i, arr) =>
+          arr.findIndex(x =>
+            x.pr._repo === w.pr._repo &&
+            x.pr.number === w.pr.number &&
+            x.reviewer === w.reviewer &&
+            +new Date(x.reviewWindowStart) === +new Date(w.reviewWindowStart)
+          ) === i
+        );
+        // Group windows by unique PR (repo#number), merging all bot reviewers
+        const prGroups = new Map();
+        for (const w of windows) {
+          const key = `${w.pr._repo}#${w.pr.number}`;
+          if (!prGroups.has(key)) {
+            prGroups.set(key, { pr: w.pr, reviewer: w.reviewer, isBotView, windows: [] });
+          }
+          prGroups.get(key).windows.push(w);
+        }
+        // Sort groups by repo then PR number
+        const sortedGroups = Array.from(prGroups.values()).sort((a, b) => {
+          if (a.pr._repo !== b.pr._repo) return a.pr._repo.localeCompare(b.pr._repo);
+          return a.pr.number - b.pr.number;
+        });
+        // Render each PR once with all its review windows
+        sortedGroups.forEach(g => {
+          g.windows.sort((a, b) => a.reviewWindowStart - b.reviewWindowStart);
+          renderReviewedPR(g.pr, g.reviewer, g.windows, modalContent, g.isBotView);
+        });
+      } else {
+        // PR list (we already have _linesChanged populated for merged PRs)
+        prArr.forEach(pr => {
+          const prUrl = pr.html_url;
+          const prTitle = pr.title || prUrl;
+          const prNum = pr.number;
+          const repo = pr._repo;
+          const updates = pr._updateCount != null ? pr._updateCount : 0;
+          const showLines = !!pr.merged_at && typeof pr._linesChanged === 'number';
+          const linesSpan = showLines ? `<span class=\"ml-2 text-xs text-gray-500\">Lines: ${pr._linesChanged}</span>` : '';
+          modalContent.innerHTML += `
+            <div>
+              <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
+              <span class="ml-2 text-xs text-gray-500">Updates: ${updates}</span>
+              ${linesSpan}
+            </div>
+          `;
+        });
+      }
+      modal.classList.remove("hidden");
+      modal.classList.add("flex");
+      modal.onclick = function (e) {
+        if (e.target === modal) {
+          modal.classList.add("hidden");
+          modal.classList.remove("flex");
+        }
+      };
+      document.getElementById("prModalClose").onclick = function (e) {
+        modal.classList.add("hidden");
+        modal.classList.remove("flex");
+        e.stopPropagation();
+      };
+    }
+
+    // Helper to render a single reviewed PR in the modal (all review windows + comments)
+    function renderReviewedPR(pr, reviewer, windows, modalContent, isBotView) {
+      const prUrl = pr.html_url;
+      const prTitle = pr.title || prUrl;
+      const prNum = pr.number;
+      const repo = pr._repo;
+      const timeFmt = t => t.toLocaleString();
+      const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const matchReviewer = (login) => isBotView ? isBot(login) : login === reviewer;
+
+      // Build review actions HTML from all windows
+      let actionsHtml = "";
+      for (const w of windows) {
+        for (const r of w.group) {
+          actionsHtml += `
+            <div class="ml-4 text-sm text-gray-700">
+              <span class="font-semibold">${r.state}</span>
+              ${isBotView && r.user?.login ? `<span class="ml-1 text-xs text-gray-400">(${escapeHtml(r.user.login)})</span>` : ''}
+              <span class="ml-2">${timeFmt(new Date(r.submitted_at))}</span>
+              ${r.body ? `<div class="ml-6 text-gray-500">${escapeHtml(r.body)}</div>` : ""}
+            </div>
+          `;
+        }
+      }
+
+      // Total review time across all windows
+      const totalDuration = windows.reduce((s, w) => s + w.reviewDurationMin, 0);
+
+      // Collect inline review comments by this reviewer on this PR
+      const reviewerComments = (pr._reviewComments || [])
+        .filter(c => matchReviewer(c.user?.login))
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      // Collect conversation (issue) comments by this reviewer on this PR
+      const issueComments = (pr._issueComments || [])
+        .filter(c => matchReviewer(c.user?.login))
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+      let commentsHtml = "";
+      if (reviewerComments.length > 0 || issueComments.length > 0) {
+        commentsHtml += `<div class="mt-2 border-t border-gray-200 pt-2">`;
+        commentsHtml += `<div class="text-xs font-semibold text-gray-500 mb-1">Comments (${reviewerComments.length + issueComments.length})</div>`;
+        for (const c of reviewerComments) {
+          const path = c.path ? `<span class="text-gray-400">${escapeHtml(c.path)}${c.line ? `:${c.line}` : ''}</span> ` : '';
+          const actionedBadge = c._actioned ? `<span class="ml-1 text-xs font-bold text-green-600"> actioned</span>` : '';
+          commentsHtml += `
+            <div class="ml-4 mb-1 text-sm">
+              ${path}<span class="text-gray-400">${timeFmt(new Date(c.created_at))}</span>${actionedBadge}
+              <div class="ml-2 text-gray-600">${escapeHtml(c.body || '')}</div>
+            </div>`;
+        }
+        for (const c of issueComments) {
+          commentsHtml += `
+            <div class="ml-4 mb-1 text-sm">
+              <span class="text-xs text-blue-500 font-medium">conversation</span>
+              <span class="text-gray-400 ml-1">${timeFmt(new Date(c.created_at))}</span>
+              <div class="ml-2 text-gray-600">${escapeHtml(c.body || '')}</div>
+            </div>`;
+        }
+        commentsHtml += `</div>`;
+      }
+
+      modalContent.innerHTML += `
+        <div class="mb-2 p-2 rounded bg-gray-50 border border-gray-200">
+          <div>
+            <a href="${prUrl}" target="_blank" class="text-blue-700 underline font-medium">${repo}#${prNum}: ${prTitle}</a>
+            <br/>
+            <span class="ml-2 text-xs text-gray-500">Reviewer: ${reviewer}</span>
+            <span class="ml-2 text-xs text-gray-500">Review sessions: ${windows.length} (${totalDuration.toFixed(1)} min total)</span>
+          </div>
+          ${actionsHtml}
+          ${commentsHtml}
+        </div>
+      `;
+    }
+
+    // Add this helper function before its first usage (above the PR/Review table rendering code)
+    function renderUserCell(userObj) {
+      if (!userObj) return "";
+      return `<span class="font-semibold">${userObj.login}</span>`;
+    }
+
+    // Handle form
+    document.getElementById("prForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const token = document.getElementById("token").value;
+      const repoInput = document.getElementById("repo").value.trim();
+      let dateFrom = document.getElementById("dateFrom").value;
+      let dateTo = document.getElementById("dateTo").value;
+
+      // Set local time, then convert to UTC ISO string
+      if (dateFrom) {
+        const d = new Date(dateFrom);
+        d.setHours(0, 0, 0, 0);
+        dateFrom = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+      }
+      if (dateTo) {
+        const d = new Date(dateTo);
+        d.setHours(23, 59, 59, 999);
+        dateTo = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString();
+      }
+
+      const resultsDiv = document.getElementById("results");
+      const prTablePanel = document.getElementById("prTablePanel");
+      const reviewTablePanel = document.getElementById("reviewTablePanel");
+      resultsDiv.classList.add("hidden");
+      prTablePanel.classList.add("hidden");
+      reviewTablePanel.classList.add("hidden");
+
+      const progress = createProgressUI();
+      progress.open();
+      progress.resetApiUsage();
+
+      try {
+        // Check if recording/playback is enabled via URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const recordParam = urlParams.get('record');
+        const recordingEnabled = urlParams.has('record') && !recordParam;
+        const playbackFile = recordParam || null;
+        
+        let client;
+        
+        if (playbackFile) {
+          // Playback mode - load recordings from file
+          console.log(`📼 Playback mode enabled - replaying from file: ${playbackFile}`);
+          
+          try {
+            // Load the recordings file
+            const response = await fetch(playbackFile);
+            if (!response.ok) {
+              throw new Error(`Failed to load recordings file: ${response.status} ${response.statusText}`);
+            }
+            const recordingsData = await response.json();
+            
+            // Handle both old format (array) and new format (object with metadata)
+            const recordingsCount = Array.isArray(recordingsData) 
+              ? recordingsData.length 
+              : recordingsData.recordings?.length || 0;
+            console.log(`📊 Loaded ${recordingsCount} recorded API calls`);
+            
+            client = new PlaybackGitHubClient(token, recordingsData);
+          } catch (error) {
+            throw new Error(`Failed to load playback file "${playbackFile}": ${error.message}`);
+          }
+        } else {
+          // Normal or recording mode
+          if (recordingEnabled) {
+            console.log('🔴 Recording mode enabled - all API requests will be logged');
+          }
+          
+          // Create Git platform client (GitHub in this case)
+          client = new GitHubClient(token, { recordingEnabled });
+        }
+        
+        let repos;
+        if (!repoInput) {
+          progress.setStatus("Fetching all private repositories…");
+          repos = await getAllPrivateRepos(client, progress);
+          if (repos.length === 0) throw new Error("No private repositories found for this token.");
+          if (repos.length > 5) {
+            progress.close();
+            if (!confirm(`You have ${repos.length} private repositories. This may take a long time and hit API rate limits. Proceed?`)) {
+              return;
+            }
+            progress.open();
+          }
+        } else {
+          repos = repoInput.split(",").map(s => s.trim()).filter(Boolean);
+        }
+
+        // Set recording metadata if recording is enabled
+        if (recordingEnabled) {
+          client.setRecordingMetadata(repos, dateFrom, dateTo);
+        }
+
+        const stats = await getPRStats(client, repos, { dateFrom, dateTo }, progress);
+
+        // Store computed results in recording if recording is enabled
+        if (recordingEnabled) {
+          client.setComputedResults(stats);
+        }
+
+        // Get table body elements
+        const prTableBody = document.getElementById("prTableBody");
+        const reviewTableBody = document.getElementById("reviewTableBody");
+
+        // Clear existing content
+        prTableBody.innerHTML = "";
+        reviewTableBody.innerHTML = "";
+
+        // Split stats into PR rows and Review rows
+        const prRows = [];
+        const reviewRows = [];
+        for (const r of stats) {
+          const user = isBot(r.user) ? BOT_LABEL : r.user;
+          prRows.push({ user, month: r.month, count: r.count, approved: r.approved, merged: r.merged, prList: r.prList, approvedList: r.approvedList, mergedList: r.mergedList });
+          reviewRows.push({ user, month: r.month, reviewed: r.reviewed, prsReviewed: r.prsReviewed, avgCommentsPerReview: r.avgCommentsPerReview, avgReviewTime: r.avgReviewTime, reviewedList: r.reviewedList, actionedPct: r.actionedPct, actionedCount: r.actionedCount, totalComments: r.totalComments });
+        }
+
+        // Merge rows that share the same (user, month) — needed after bot consolidation
+        function mergeRows(rows, numericKeys, listKeys) {
+          const map = new Map();
+          for (const r of rows) {
+            const key = `${r.user}|${r.month}`;
+            if (!map.has(key)) {
+              map.set(key, { ...r });
+            } else {
+              const existing = map.get(key);
+              for (const k of numericKeys) existing[k] = (existing[k] || 0) + (r[k] || 0);
+              for (const k of listKeys) existing[k] = (existing[k] || []).concat(r[k] || []);
+            }
+          }
+          return Array.from(map.values());
+        }
+        const mergedPrRows = mergeRows(prRows, ['count', 'approved', 'merged'], ['prList', 'approvedList', 'mergedList']);
+        // For review rows we need special handling: avgCommentsPerReview and avgReviewTime are per-unit averages
+        // Reconstruct totals then re-derive averages after merge
+        const reviewRawRows = reviewRows.map(r => ({
+          ...r,
+          totalComments: (r.prsReviewed || 0) * parseFloat(r.avgCommentsPerReview || 0),
+          totalReviewTime: (r.prsReviewed || 0) * parseFloat(r.avgReviewTime || 0),
+        }));
+        const mergedReviewRows = mergeRows(reviewRawRows,
+          ['reviewed', 'prsReviewed', 'actionedCount', 'totalComments', 'totalReviewTime'],
+          ['reviewedList']
+        ).map(r => ({
+          ...r,
+          avgCommentsPerReview: r.prsReviewed ? (r.totalComments / r.prsReviewed).toFixed(2) : "0.00",
+          avgReviewTime: r.prsReviewed ? (r.totalReviewTime / r.prsReviewed).toFixed(2) : "0.00",
+          actionedPct: r.totalComments ? Math.round((r.actionedCount / r.totalComments) * 100) + "%" : "\u2014",
+        }));
+
+        // Sort both tables by user name ascending
+        mergedPrRows.sort((a, b) => a.user.localeCompare(b.user));
+        mergedReviewRows.sort((a, b) => a.user.localeCompare(b.user));
+
+        // Group by user for summary rows
+        function groupRows(rows, keys) {
+          const byUser = new Map();
+          for (const r of rows) {
+            const entry = byUser.get(r.user) || { months: [], totals: {} };
+            entry.months.push(r);
+            keys.forEach(k => {
+              entry.totals[k] = (entry.totals[k] || 0) + (parseFloat(r[k]) || 0);
+            });
+            byUser.set(r.user, entry);
+          }
+          return byUser;
+        }
+
+        // Helper to find a user object with avatar across all months
+        function findUserWithAvatar(entry, username) {
+          for (const m of entry.months) {
+            if (m.prList && m.prList.length > 0 && m.prList[0].user?.avatar_url) return m.prList[0].user;
+            if (m.reviewedList && m.reviewedList.length > 0 && m.reviewedList[0].review?.user?.avatar_url) return m.reviewedList[0].review.user;
+            if (m.approvedList && m.approvedList.length > 0 && m.approvedList[0].user?.avatar_url) return m.approvedList[0].user;
+            if (m.mergedList && m.mergedList.length > 0 && m.mergedList[0].user?.avatar_url) return m.mergedList[0].user;
+          }
+          return { login: username };
+        }
+
+        // PR Table
+        const prByUser = groupRows(mergedPrRows, ["count", "merged"]);
+        progress.setStatus("Rendering PR table…");
+
+        progress.setOverallScaled(0, prByUser.size, 95, 97);
+
+        let prUserIndex = 0;
+        const prUserEntries = Array.from(prByUser.entries());
+
+        for (const [user, entry] of prUserEntries) {
+          if (prUserIndex % 20 === 0) {
+            progress.setSub(prUserIndex, prUserEntries.length);
+            progress.setOverallScaled(prUserIndex, prUserEntries.length, 95, 97);
+            await new Promise(r => setTimeout(r, 0));
+          }
+          prUserIndex++;
+
+          if ((entry.totals.count || entry.totals.merged)) {
+            // NEW: aggregate line stats across merged PRs (all months)
+            const totalLinesChangedAll = entry.months.reduce((sum, m) => sum + (Array.isArray(m.mergedList) ? m.mergedList.reduce((s, pr) => s + (pr._linesChanged || 0), 0) : 0), 0);
+            // Existing total updates & merge time logic
+            const totalUpdatesAll = entry.months.reduce((sum, m) => {
+              if (Array.isArray(m.mergedList)) {
+                return sum + m.mergedList.reduce((s, pr) => s + (pr._updateCount ?? 0), 0);
+              }
+              return sum;
+            }, 0);
+            let totalMergeTimeAll = 0; let mergedCountAll = 0;
+            entry.months.forEach(m => {
+              if (Array.isArray(m.mergedList)) {
+                m.mergedList.forEach(pr => {
+                  if (pr.created_at && pr.merged_at) {
+                    totalMergeTimeAll += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
+                    mergedCountAll++;
+                  }
+                });
+              }
+            });
+            const avgMergeTimeAll = mergedCountAll > 0 ? (totalMergeTimeAll / mergedCountAll).toFixed(2) : "0.00";
+            const tr = document.createElement("tr");
+            tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
+            tr.dataset.user = user;
+            tr.innerHTML = `
+              <td class="p-3 border font-medium flex items-center">
+                <span class="mr-2 inline-block">
+                  <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                  </svg>
+                </span>
+                ${(() => { const userObj = findUserWithAvatar(entry, user); const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}<span class=\"font-semibold\">${userObj.login}</span>`; })()}
+              </td>
+              <td class="p-3 border text-gray-500">All</td>
+              <td class="p-3 border font-semibold">${entry.totals.count}</td>
+              <td class="p-3 border font-semibold">${entry.totals.merged}</td>
+              <td class="p-3 border font-semibold">${(totalUpdatesAll / entry.totals.merged).toFixed(2)}</td>
+              <td class="p-3 border font-semibold">${totalLinesChangedAll}</td>
+              <td class="p-3 border font-semibold">${avgMergeTimeAll}</td>`;
+            prTableBody.appendChild(tr);
+            // Detail rows
+            const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+            for (const m of monthsSorted) {
+              let totalMergeTimeMonth = 0; let mergedCountMonth = 0; let totalUpdatesMonth = 0; let linesChangedMonth = 0;
+              if (Array.isArray(m.mergedList)) {
+                m.mergedList.forEach(pr => {
+                  if (pr.created_at && pr.merged_at) {
+                    totalMergeTimeMonth += (new Date(pr.merged_at) - new Date(pr.created_at)) / 3600000;
+                    mergedCountMonth++;
+                  }
+                  totalUpdatesMonth += pr._updateCount ?? 0;
+                  linesChangedMonth += pr._linesChanged || 0;
+                });
+              }
+              const avgMergeTimeMonth = mergedCountMonth > 0 ? (totalMergeTimeMonth / mergedCountMonth).toFixed(2) : "0.00";
+              const dtr = document.createElement("tr");
+              dtr.className = "detail-row hidden cursor-pointer hover:bg-gray-100";
+              dtr.dataset.parent = user;
+              dtr.dataset.user = user;
+              dtr.dataset.month = m.month;
+              dtr.innerHTML = `
+                <td class="p-3 border pl-8 text-gray-500"></td>
+                <td class="p-3 border">${m.month}</td>
+                <td class="p-3 border">${m.count}</td>
+                <td class="p-3 border">${m.merged}</td>
+                <td class="p-3 border">${totalUpdatesMonth}</td>
+                <td class="p-3 border">${linesChangedMonth}</td>
+                <td class="p-3 border">${avgMergeTimeMonth}</td>`;
+              prTableBody.appendChild(dtr);
+            }
+          }
+        }
+
+        // Peer Review Table
+        const reviewByUser = groupRows(mergedReviewRows, ["prsReviewed", "actionedCount", "totalComments"]);
+        progress.setStatus("Rendering Review table…");
+
+        progress.setOverallScaled(0, reviewByUser.size, 97, 100);
+
+        let reviewUserIndex = 0;
+        const reviewUserEntries = Array.from(reviewByUser.entries());
+
+        for (const [user, entry] of reviewUserEntries) {
+          if (reviewUserIndex % 20 === 0) {
+            progress.setSub(reviewUserIndex, reviewUserEntries.length);
+            progress.setOverallScaled(reviewUserIndex, reviewUserEntries.length, 97, 100);
+            await new Promise(r => setTimeout(r, 0));
+          }
+          reviewUserIndex++;
+
+          if ((entry.totals.prsReviewed)) {
+            const totalReviewed = entry.totals.prsReviewed;
+            const totalActioned = entry.totals.actionedCount || 0;
+            const totalCommentsAll = entry.totals.totalComments || 0;
+            const actionedPctOverall = totalCommentsAll ? Math.round((totalActioned / totalCommentsAll) * 100) + "%" : "\u2014";
+            // Use total raw values (reconstructed) instead of per-month average to account for months with 0
+            const totalPrsReviewed = entry.months.reduce((s, m) => s + (m.prsReviewed || 0), 0);
+            const totalComments = entry.months.reduce((s, m) => s + ((m.prsReviewed || 0) * parseFloat(m.avgCommentsPerReview)), 0);
+            const totalReviewTime = entry.months.reduce((s, m) => s + ((m.prsReviewed || 0) * parseFloat(m.avgReviewTime)), 0);
+            const avgComments = totalPrsReviewed ? (totalComments / totalPrsReviewed).toFixed(2) : "0.00";
+            const avgReviewTime = totalPrsReviewed ? (totalReviewTime / totalPrsReviewed).toFixed(2) : "0.00";
+            const tr = document.createElement("tr");
+            tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
+            tr.dataset.user = user;
+            tr.innerHTML = `
+              <td class="p-3 border font-medium flex items-center">
+                <span class="mr-2 inline-block">
+                  <svg data-icon class="w-3 h-3 inline-block align-middle transition-transform" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 111.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/>
+                  </svg>
+                </span>
+                ${(() => { const userObj = findUserWithAvatar(entry, user); const avatar = userObj.avatar_url ? `<img src="${userObj.avatar_url}" class="inline-block w-6 h-6 rounded-full align-middle mr-2" alt="${userObj.login}">` : ""; return `${avatar}${renderUserCell(userObj)}`; })()}
+              </td>
+              <td class="p-3 border text-gray-500">All</td>
+              <td class="p-3 border font-semibold">${totalReviewed}</td>
+              <td class="p-3 border font-semibold">${avgReviewTime}</td>
+              <td class="p-3 border font-semibold">${avgComments}</td>
+              <td class="p-3 border font-semibold">${actionedPctOverall}</td>`;
+            reviewTableBody.appendChild(tr);
+            const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
+            for (const m of monthsSorted) {
+              const dtr = document.createElement("tr");
+              dtr.className = "detail-row hidden cursor-pointer hover:bg-gray-100";
+              dtr.dataset.parent = user;
+              dtr.dataset.user = user;
+              dtr.dataset.month = m.month;
+              dtr.innerHTML = `
+                <td class="p-3 border pl-8 text-gray-500"></td>
+                <td class="p-3 border">${m.month}</td>
+                <td class="p-3 border">${m.prsReviewed}</td>
+                <td class="p-3 border">${m.avgReviewTime}</td>
+                <td class="p-3 border">${m.avgCommentsPerReview}</td>
+                <td class="p-3 border">${m.actionedPct}</td>`;
+              reviewTableBody.appendChild(dtr);
+            }
+          }
+        }
+
+        // Attach click handlers for PR modal (PR table) - whole detail row is clickable
+        prTableBody.querySelectorAll('tr.detail-row').forEach(row => {
+          row.onclick = function (e) {
+            const user = row.dataset.user;
+            const month = row.dataset.month;
+            if (!user || !month) return;
+            let entry = prByUser.get(user);
+            if (!entry) return;
+            let prArr = [];
+            let title = "";
+            if (month === "all") {
+              entry.months.forEach(m => { prArr = prArr.concat(m.prList); });
+              title = `PRs by ${user} (all months)`;
+            } else {
+              const monthEntry = entry.months.find(x => x.month === month);
+              if (monthEntry) {
+                prArr = monthEntry.prList;
+                title = `PRs by ${user} in ${month}`;
+              }
+            }
+            showPRModal(title, prArr, false);
+          };
+        });
+
+        // Attach click handlers for review modal (Review table) - whole detail row is clickable
+        reviewTableBody.querySelectorAll('tr.detail-row').forEach(row => {
+          row.onclick = function (e) {
+            const user = row.dataset.user;
+            const month = row.dataset.month;
+            if (!user || !month) return;
+            let entry = reviewByUser.get(user);
+            if (!entry) return;
+            let prArr = [];
+            let title = "";
+            if (month === "all") {
+              entry.months.forEach(m => prArr = prArr.concat(m.reviewedList));
+              title = `PRs reviewed by ${user} (all months)`;
+            } else {
+              const monthEntry = entry.months.find(x => x.month === month);
+              if (monthEntry) {
+                prArr = monthEntry.reviewedList;
+                title = `PRs reviewed by ${user} in ${month}`;
+              }
+            }
+            showPRModal(title, prArr, true);
+          };
+        });
+
+        // Delegate click to toggle details per user (rotates the SVG chevron) for both tables
+        function bindToggle(tableBody) {
+          if (!tableBody.dataset.toggleBound) {
+            tableBody.addEventListener("click", (evt) => {
+              const row = evt.target.closest("tr.summary-row");
+              if (!row) return;
+              const user = row.dataset.user;
+              const shouldOpen = row.dataset.expanded !== "1";
+              tableBody.querySelectorAll(`tr.detail-row[data-parent="${CSS.escape(user)}"]`).forEach(r => {
+                if (shouldOpen) r.classList.remove("hidden"); else r.classList.add("hidden");
+              });
+              const icon = row.querySelector("[data-icon]");
+              if (icon) icon.style.transform = shouldOpen ? "rotate(90deg)" : "rotate(0deg)";
+              row.dataset.expanded = shouldOpen ? "1" : "0";
+            });
+            tableBody.dataset.toggleBound = "1";
+          }
+        }
+        bindToggle(prTableBody);
+        bindToggle(reviewTableBody);
+
+        // Show/hide table panels based on rows
+        if (mergedPrRows.length > 0 || mergedReviewRows.length > 0) {
+          resultsDiv.classList.remove("hidden");
+        } else {
+          resultsDiv.classList.add("hidden");
+        }
+        if (mergedPrRows.length > 0) {
+          prTablePanel.classList.remove("hidden");
+        } else {
+          prTablePanel.classList.add("hidden");
+        }
+        if (mergedReviewRows.length > 0) {
+          reviewTablePanel.classList.remove("hidden");
+        } else {
+          reviewTablePanel.classList.add("hidden");
+        }
+        
+        // Download recordings if recording was enabled (not in playback mode)
+        if (recordingEnabled && !playbackFile) {
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+          const recordingCount = client.getRecordings().length;
+          console.log(`📊 Total API calls recorded: ${recordingCount}`);
+          client.downloadRecordings(`api-recordings-${timestamp}.json`);
+          console.log('✅ API recordings downloaded');
+        }
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        progress.close();
+      }
+    });
+
+    // Removed obsolete dark mode toggle script (themeToggle element not present)
+  </script>
+</body>
+
+</html>
