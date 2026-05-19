@@ -30,7 +30,7 @@ Everything is grouped **per user, per month** — so you can spot trends and cel
 
 It's just one HTML file. Seriously.
 
-1. Open `developer-velocity.html` in any modern browser
+1. Open [`developer-velocity.html`](https://dkharlap.github.io/developer-velocity/developer-velocity.html) in any modern browser
 2. Paste your GitHub token
 3. Enter repos (like `myorg/api, myorg/frontend`) — or leave blank to scan all your private repos
 4. Pick a date range
