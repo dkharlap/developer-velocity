@@ -1,4 +1,4 @@
-# 🚀 Developer Velocity
+# Developer Velocity
 
 **Know how your team ships.** Developer Velocity is a lightweight, zero-backend tool that gives you instant visibility into your team's pull request and code review activity across GitHub repos.
 
