@@ -131,8 +131,7 @@
               <th class="p-3">User</th>
               <th class="p-3">Month</th>
               <th class="p-3">PRs Reviewed</th>
-              <th class="p-3">Avg Review (min)</th>
-              <th class="p-3">Avg Comments</th>
+              <th class="p-3">Total Comments</th>
               <th class="p-3">Actioned Comments</th>
             </tr>
           </thead>
@@ -752,7 +751,6 @@
       const reviewsDoneByUserMonth = {};
       const logicalReviewsByUserMonth = {};
       const commentsByUserMonth = {};
-      const reviewTimeByUserMonth = {};
       const prMapByUserMonth = {};
       const approvedMapByUserMonth = {};
       const mergedMapByUserMonth = {};
@@ -890,11 +888,9 @@
 
           logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {};
           commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {};
-          reviewTimeByUserMonth[reviewer] = reviewTimeByUserMonth[reviewer] || {};
           actionedCommentsByUserMonth[reviewer] = actionedCommentsByUserMonth[reviewer] || {};
           logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + groups.length;
           commentsByUserMonth[reviewer][prMonth] = commentsByUserMonth[reviewer][prMonth] || 0;
-          reviewTimeByUserMonth[reviewer][prMonth] = reviewTimeByUserMonth[reviewer][prMonth] || 0;
           actionedCommentsByUserMonth[reviewer][prMonth] = actionedCommentsByUserMonth[reviewer][prMonth] || 0;
 
           // Count ALL comments by this reviewer within the date range (not just in review windows)
@@ -959,7 +955,6 @@
             if (commentTimes.length === 0) { durationMin = 3; reviewWindowStart = new Date(windowStart - 3 * 60000); }
             else if (commentTimes.length === 1) { durationMin = 5; reviewWindowStart = new Date(commentTimes[0] - 5 * 60000); }
             else { const minT = Math.min(...commentTimes.map(d => d.getTime())); const maxT = Math.max(...commentTimes.map(d => d.getTime())); durationMin = 5 + (maxT - minT) / 60000; reviewWindowStart = new Date(minT - 5 * 60000); }
-            reviewTimeByUserMonth[reviewer][prMonth] += durationMin;
             (pr._reviewWindows = pr._reviewWindows || []).push({ reviewer, group: g, reviewWindowStart, reviewDurationMin: durationMin, groupStart: windowStart, groupEnd: windowEnd });
           }
           reviewsDoneByUserMonth[reviewer] = reviewsDoneByUserMonth[reviewer] || {};
@@ -996,7 +991,7 @@
         console.log(`   Skipped ${skippedFiles} file requests (unmerged PRs with no review comments)`);
       }
 
-      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, reviewTimeByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth, prsReviewedByUserMonth };
+      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth, prsReviewedByUserMonth };
     }
 
     function filterPRsByDate(prs, dateFrom, dateTo) {
@@ -1043,7 +1038,6 @@
       grouped,
       logicalReviewsByUserMonth,
       commentsByUserMonth,
-      reviewTimeByUserMonth,
       prMapByUserMonth,
       approvedMapByUserMonth,
       mergedMapByUserMonth,
@@ -1086,7 +1080,6 @@
           const logicalReviews = logicalReviewsByUserMonth[user]?.[m] || 0;
           const comments = commentsByUserMonth[user]?.[m] || 0;
           const actioned = actionedCommentsByUserMonth?.[user]?.[m] || 0;
-          const totalReviewTime = reviewTimeByUserMonth[user]?.[m] || 0;
           const prsReviewed = prsReviewedByUserMonth?.[user]?.[m]?.size || 0;
           const avgActioned = comments ? Math.round((actioned / comments) * 100) + "%" : "—";
           rows.push({
@@ -1103,7 +1096,6 @@
             reviewed: logicalReviews,
             prsReviewed,
             avgCommentsPerReview: prsReviewed ? (comments / prsReviewed).toFixed(2) : "0.00",
-            avgReviewTime: prsReviewed ? (totalReviewTime / prsReviewed).toFixed(2) : "0.00",
             reviewedList: reviewedMapByUserMonth[user]?.[m] || [],
             actionedCount: actioned,
             totalComments: comments,
@@ -1199,7 +1191,6 @@
         grouped,
         reviewStats.logicalReviewsByUserMonth,
         reviewStats.commentsByUserMonth,
-        reviewStats.reviewTimeByUserMonth,
         reviewStats.prMapByUserMonth,
         reviewStats.approvedMapByUserMonth,
         reviewStats.mergedMapByUserMonth,
@@ -1604,7 +1595,7 @@
         for (const r of stats) {
           const user = isBot(r.user) ? BOT_LABEL : r.user;
           prRows.push({ user, month: r.month, count: r.count, approved: r.approved, merged: r.merged, prList: r.prList, approvedList: r.approvedList, mergedList: r.mergedList });
-          reviewRows.push({ user, month: r.month, reviewed: r.reviewed, prsReviewed: r.prsReviewed, avgCommentsPerReview: r.avgCommentsPerReview, avgReviewTime: r.avgReviewTime, reviewedList: r.reviewedList, actionedPct: r.actionedPct, actionedCount: r.actionedCount, totalComments: r.totalComments });
+          reviewRows.push({ user, month: r.month, reviewed: r.reviewed, prsReviewed: r.prsReviewed, avgCommentsPerReview: r.avgCommentsPerReview, reviewedList: r.reviewedList, actionedPct: r.actionedPct, actionedCount: r.actionedCount, totalComments: r.totalComments });
         }
 
         // Merge rows that share the same (user, month) — needed after bot consolidation
@@ -1623,20 +1614,11 @@
           return Array.from(map.values());
         }
         const mergedPrRows = mergeRows(prRows, ['count', 'approved', 'merged'], ['prList', 'approvedList', 'mergedList']);
-        // For review rows we need special handling: avgCommentsPerReview and avgReviewTime are per-unit averages
-        // Reconstruct totals then re-derive averages after merge
-        const reviewRawRows = reviewRows.map(r => ({
-          ...r,
-          totalComments: (r.prsReviewed || 0) * parseFloat(r.avgCommentsPerReview || 0),
-          totalReviewTime: (r.prsReviewed || 0) * parseFloat(r.avgReviewTime || 0),
-        }));
-        const mergedReviewRows = mergeRows(reviewRawRows,
-          ['reviewed', 'prsReviewed', 'actionedCount', 'totalComments', 'totalReviewTime'],
+        const mergedReviewRows = mergeRows(reviewRows,
+          ['reviewed', 'prsReviewed', 'actionedCount', 'totalComments'],
           ['reviewedList']
         ).map(r => ({
           ...r,
-          avgCommentsPerReview: r.prsReviewed ? (r.totalComments / r.prsReviewed).toFixed(2) : "0.00",
-          avgReviewTime: r.prsReviewed ? (r.totalReviewTime / r.prsReviewed).toFixed(2) : "0.00",
           actionedPct: r.totalComments ? Math.round((r.actionedCount / r.totalComments) * 100) + "%" : "\u2014",
         }));
 
@@ -1782,12 +1764,6 @@
             const totalActioned = entry.totals.actionedCount || 0;
             const totalCommentsAll = entry.totals.totalComments || 0;
             const actionedPctOverall = totalCommentsAll ? Math.round((totalActioned / totalCommentsAll) * 100) + "%" : "\u2014";
-            // Use total raw values (reconstructed) instead of per-month average to account for months with 0
-            const totalPrsReviewed = entry.months.reduce((s, m) => s + (m.prsReviewed || 0), 0);
-            const totalComments = entry.months.reduce((s, m) => s + ((m.prsReviewed || 0) * parseFloat(m.avgCommentsPerReview)), 0);
-            const totalReviewTime = entry.months.reduce((s, m) => s + ((m.prsReviewed || 0) * parseFloat(m.avgReviewTime)), 0);
-            const avgComments = totalPrsReviewed ? (totalComments / totalPrsReviewed).toFixed(2) : "0.00";
-            const avgReviewTime = totalPrsReviewed ? (totalReviewTime / totalPrsReviewed).toFixed(2) : "0.00";
             const tr = document.createElement("tr");
             tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
             tr.dataset.user = user;
@@ -1802,8 +1778,7 @@
               </td>
               <td class="p-3 border text-gray-500">All</td>
               <td class="p-3 border font-semibold">${totalReviewed}</td>
-              <td class="p-3 border font-semibold">${avgReviewTime}</td>
-              <td class="p-3 border font-semibold">${avgComments}</td>
+              <td class="p-3 border font-semibold">${totalCommentsAll}</td>
               <td class="p-3 border font-semibold">${actionedPctOverall}</td>`;
             reviewTableBody.appendChild(tr);
             const monthsSorted = entry.months.sort((a, b) => a.month.localeCompare(b.month));
@@ -1817,8 +1792,7 @@
                 <td class="p-3 border pl-8 text-gray-500"></td>
                 <td class="p-3 border">${m.month}</td>
                 <td class="p-3 border">${m.prsReviewed}</td>
-                <td class="p-3 border">${m.avgReviewTime}</td>
-                <td class="p-3 border">${m.avgCommentsPerReview}</td>
+                <td class="p-3 border">${m.totalComments}</td>
                 <td class="p-3 border">${m.actionedPct}</td>`;
               reviewTableBody.appendChild(dtr);
             }
