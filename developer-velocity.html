@@ -334,7 +334,7 @@
 
       async _fetchPaginated(baseUrl, recordParams) {
         // Fetch all pages of a GitHub API list endpoint (per_page=100).
-        // Returns { data: <combined array>, response: <last page's response> }.
+        // Returns { data: <combined array>, response: <last page's response>, pages: <number of requests made> }.
         const perPage = 100;
         const aggregated = [];
         let page = 1;
@@ -347,7 +347,7 @@
           lastResponse = response;
           if (!response.ok) {
             this.recordRequest('GET', url.toString(), { ...recordParams, perPage, page }, { error: response.statusText }, response.headers);
-            return { data: aggregated, response };
+            return { data: aggregated, response, pages: page };
           }
           const pageData = await response.json();
           this.recordRequest('GET', url.toString(), { ...recordParams, perPage, page }, pageData, response.headers);
@@ -357,7 +357,7 @@
           if (!Array.isArray(pageData) || pageData.length < perPage) break;
           page++;
         }
-        return { data: aggregated, response: lastResponse };
+        return { data: aggregated, response: lastResponse, pages: page };
       }
 
       async getReviews(repo, prNumber) {
@@ -513,7 +513,7 @@
           }
           if (!Array.isArray(pageData) || pageData.length < perPage) {
             const mockResponse = this._createMockResponse(recording);
-            return { data: aggregated, response: mockResponse };
+            return { data: aggregated, response: mockResponse, pages: page };
           }
           page++;
         }
@@ -521,11 +521,11 @@
         const legacy = this._findRecording('GET', baseUrl);
         if (legacy) {
           const mockResponse = this._createMockResponse(legacy);
-          return { data: legacy.response, response: mockResponse };
+          return { data: legacy.response, response: mockResponse, pages: 1 };
         }
         if (lastRecording) {
           const mockResponse = this._createMockResponse(lastRecording);
-          return { data: aggregated, response: mockResponse };
+          return { data: aggregated, response: mockResponse, pages: page - 1 };
         }
         throw new Error(`No recorded response found for GET ${baseUrl}`);
       }
@@ -1270,11 +1270,9 @@
         if (resp && resp.headers) {
           const rem = resp.headers.get("X-RateLimit-Remaining");
           if (rem !== null) {
-            const remaining = parseInt(rem, 10);
-            // Only update if we don't have a value yet, or if the new value is lower
-            // This prevents jumping around when async responses arrive out of order
-            if (apiRemaining === null || remaining < parseInt(apiRemaining, 10)) {
-              apiRemaining = remaining;
+            const remNum = parseInt(rem, 10);
+            if (apiRemaining === null || remNum < apiRemaining) {
+              apiRemaining = remNum;
             }
           }
         }
@@ -1311,7 +1309,7 @@
 
     // Detect GitHub bot accounts
     const BOT_LABEL = "bots";
-    const isBot = (name) => /\[bot\]$/i.test(name) || name === 'dependabot' || name === 'github-actions';
+    const isBot = (name) => /\[bot\]$/i.test(name) || /^copilot$/i.test(name) || name === 'dependabot' || name === 'github-actions';
 
     // Add showPRModal function before the form submit handler
     function showPRModal(title, prArr, isReviewList) {
