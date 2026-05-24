@@ -279,6 +279,10 @@
       async getCommits(commitsUrl) {
         throw new Error('getCommits() must be implemented');
       }
+
+      async getCommitDetail(repo, sha) {
+        throw new Error('getCommitDetail() must be implemented');
+      }
     }
 
     /**
@@ -401,6 +405,20 @@
         
         const data = await response.json();
         this.recordRequest('GET', commitsUrl, {}, data, response.headers);
+        return { data, response };
+      }
+
+      async getCommitDetail(repo, sha) {
+        const url = `${this.baseUrl}/repos/${repo}/commits/${sha}`;
+        const response = await fetch(url, { headers: this.headers });
+        
+        if (!response.ok) {
+          this.recordRequest('GET', url, { repo, sha }, { error: response.statusText }, response.headers);
+          return { data: null, response };
+        }
+        
+        const data = await response.json();
+        this.recordRequest('GET', url, { repo, sha }, data, response.headers);
         return { data, response };
       }
 
@@ -573,6 +591,20 @@
         return { data: recording.response, response: mockResponse };
       }
 
+      async getCommitDetail(repo, sha) {
+        const url = `${this.baseUrl}/repos/${repo}/commits/${sha}`;
+        const recording = this._findRecording('GET', url);
+        
+        if (!recording) {
+          console.warn(`No recorded response found for GET ${url}`);
+          const mockResponse = this._createMockResponse({ headers: {} });
+          return { data: null, response: mockResponse };
+        }
+        
+        const mockResponse = this._createMockResponse(recording);
+        return { data: recording.response, response: mockResponse };
+      }
+
       _findRecording(method, url) {
         const key = `${method}|${url}`;
         const indices = this.playbackIndex.get(key);
@@ -657,6 +689,10 @@
       }
 
       async getCommits(commitsUrl) {
+        throw new Error('GitLab implementation not yet available');
+      }
+
+      async getCommitDetail(repo, sha) {
         throw new Error('GitLab implementation not yet available');
       }
 
@@ -755,7 +791,8 @@
       const approvedMapByUserMonth = {};
       const mergedMapByUserMonth = {};
       const reviewedMapByUserMonth = {};
-      const actionedCommentsByUserMonth = {}; // NEW
+      const actionedCommentsByUserMonth = {};
+      const bodyCommentsByUserMonth = {}; // comments attached to approve/changes_requested (not actionable)
       const prsReviewedByUserMonth = {}; // distinct PRs a user reviewed/commented on (per month)
       
       // Track optimization savings
@@ -787,49 +824,22 @@
         progress?.incApiUsage(issueCommentsResp);
         pr._issueComments = issueComments;
 
-        // Build changed line set (final merged state) for actioned detection
-        let changedLines = new Set();
+        // Fetch files for line count display (no patch parsing here)
         const needsFiles = pr.merged_at || reviewComments.length > 0;
         
-        // Only fetch files if: 1) merged (for line counts shown in UI), OR 2) has review comments (for actioned detection)
         if (needsFiles) {
           let totalChanged = 0;
-          const needsPatchAnalysis = reviewComments.length > 0 && pr.merged_at; // Only parse patches if we need actioned detection
-          
           try {
             let page = 1;
             while (true) {
               const { data: files, response: filesResp } = await client.getPullRequestFiles(pr._repo, pr.number, { perPage: 100, page });
               progress?.incApiUsage(filesResp);
-              
               if (!files || files.length === 0) break;
-
               for (const file of files) {
-                const fileChanges = (file.changes != null) ? file.changes : 0;
-                totalChanged += fileChanges;
-                
-                // Only parse patch for actioned comment detection if needed
-                if (needsPatchAnalysis && file.patch) {
-                  const lines = file.patch.split("\n");
-                  let newLine = 0;
-                  for (const line of lines) {
-                    if (line.startsWith("@@")) {
-                      const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
-                      if (m) newLine = parseInt(m[1], 10) - 1;
-                    } else if (line.startsWith("+")) {
-                      changedLines.add(newLine);
-                      newLine++;
-                    } else if (line.startsWith("-")) {
-                      // deletion does not increment newLine
-                    } else {
-                      newLine++;
-                    }
-                  }
-                }
+                totalChanged += (file.changes != null) ? file.changes : 0;
               }
               if (files.length < 100) break;
               page++;
-              // Small delay to be nice to the API
               await new Promise(r => setTimeout(r, 50));
             }
           } catch (e) {
@@ -839,6 +849,20 @@
         } else {
           pr._linesChanged = 0;
           skippedFiles++;
+        }
+
+        // For merged PRs with review comments, fetch commit list for per-commit actioned detection
+        if (pr.merged_at && reviewComments.length > 0 && pr.commits_url) {
+          try {
+            const { data: commits, response: commitsResp } = await client.getCommits(pr.commits_url);
+            progress?.incApiUsage(commitsResp);
+            if (commits) {
+              pr._commits = commits.map(c => ({ sha: c.sha, date: c.commit.committer.date }));
+            }
+          } catch (e) {
+            console.error(`Error fetching commits for PR ${pr.number}:`, e);
+          }
+          pr._commitDetailCache = {}; // sha -> { changedFileLines: Map<path, Set<lineNum>> }
         }
 
         if (reviews.some(r => r.state === "APPROVED")) approvedSet.add(`${pr._repo}#${pr.number}`);
@@ -889,9 +913,11 @@
           logicalReviewsByUserMonth[reviewer] = logicalReviewsByUserMonth[reviewer] || {};
           commentsByUserMonth[reviewer] = commentsByUserMonth[reviewer] || {};
           actionedCommentsByUserMonth[reviewer] = actionedCommentsByUserMonth[reviewer] || {};
+          bodyCommentsByUserMonth[reviewer] = bodyCommentsByUserMonth[reviewer] || {};
           logicalReviewsByUserMonth[reviewer][prMonth] = (logicalReviewsByUserMonth[reviewer][prMonth] || 0) + groups.length;
           commentsByUserMonth[reviewer][prMonth] = commentsByUserMonth[reviewer][prMonth] || 0;
           actionedCommentsByUserMonth[reviewer][prMonth] = actionedCommentsByUserMonth[reviewer][prMonth] || 0;
+          bodyCommentsByUserMonth[reviewer][prMonth] = bodyCommentsByUserMonth[reviewer][prMonth] || 0;
 
           // Count ALL comments by this reviewer within the date range (not just in review windows)
           let totalComments = 0;
@@ -902,19 +928,56 @@
               // Check if comment falls within analysis date range
               const inDateRange = (!fromDate || ct >= fromDate) && (!toDate || ct <= toDate);
               
-              // Debug: Log first few comments and why they're filtered
-              if (idx === 0 && totalComments === 0) {
-                console.log(`PR #${pr.number}, Reviewer: ${reviewer}`);
-                console.log(`  Comment date: ${ct.toISOString()}, dateFrom: ${fromDate?.toISOString() || 'none'}, dateTo: ${toDate?.toISOString() || 'none'}`);
-                console.log(`  In date range: ${inDateRange}`);
-              }
-              
               if (inDateRange) {
                 totalComments++;
-                // Check if comment was actioned (for merged PRs only)
-                if (pr.merged_at && c.position != null && changedLines.size) {
-                  for (let ln = c.position - 10; ln <= c.position + 10; ln++) {
-                    if (changedLines.has(ln)) { totalActioned++; c._actioned = true; break; }
+                // Per-commit actioned detection: only mark actioned if a commit AFTER this comment touches nearby lines
+                if (pr.merged_at && pr._commits && c.path && (c.line != null || c.original_line != null || c.position != null)) {
+                  const commentLine = c.line || c.original_line || c.position;
+                  const commentDate = ct;
+                  // Find commits made after this comment
+                  const postCommentCommits = pr._commits.filter(cm => new Date(cm.date) > commentDate);
+                  for (const cm of postCommentCommits) {
+                    // Fetch commit detail (cached)
+                    if (!pr._commitDetailCache[cm.sha]) {
+                      try {
+                        const { data: detail, response: detailResp } = await client.getCommitDetail(pr._repo, cm.sha);
+                        progress?.incApiUsage(detailResp);
+                        const fileLines = new Map(); // path -> Set of changed line numbers
+                        if (detail && detail.files) {
+                          for (const f of detail.files) {
+                            if (f.patch) {
+                              const lines = new Set();
+                              const patchLines = f.patch.split("\n");
+                              let newLine = 0;
+                              for (const pl of patchLines) {
+                                if (pl.startsWith("@@")) {
+                                  const m = pl.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+                                  if (m) newLine = parseInt(m[1], 10) - 1;
+                                } else if (pl.startsWith("+")) {
+                                  newLine++;
+                                  lines.add(newLine);
+                                } else if (!pl.startsWith("-")) {
+                                  newLine++;
+                                }
+                              }
+                              fileLines.set(f.filename, lines);
+                            }
+                          }
+                        }
+                        pr._commitDetailCache[cm.sha] = { fileLines };
+                      } catch (e) {
+                        pr._commitDetailCache[cm.sha] = { fileLines: new Map() };
+                      }
+                    }
+                    const cached = pr._commitDetailCache[cm.sha];
+                    const fileChanged = cached.fileLines.get(c.path);
+                    if (fileChanged) {
+                      let actioned = false;
+                      for (let ln = commentLine - 10; ln <= commentLine + 10; ln++) {
+                        if (fileChanged.has(ln)) { actioned = true; break; }
+                      }
+                      if (actioned) { totalActioned++; c._actioned = true; break; }
+                    }
                   }
                 }
               }
@@ -922,16 +985,19 @@
           }
           
           // Count review body comments within date range
+          let bodyComments = 0;
           for (const rev of userReviews) {
             const rt = new Date(rev.submitted_at);
             const inDateRange = (!fromDate || rt >= fromDate) && (!toDate || rt <= toDate);
             if (inDateRange && rev.body && rev.body.trim()) {
               totalComments++;
+              bodyComments++;
             }
           }
           
           commentsByUserMonth[reviewer][prMonth] += totalComments;
           actionedCommentsByUserMonth[reviewer][prMonth] += totalActioned;
+          bodyCommentsByUserMonth[reviewer][prMonth] += bodyComments;
 
           for (const g of groups) {
             let commentTimes = []; let commentCount = 0;
@@ -991,7 +1057,7 @@
         console.log(`   Skipped ${skippedFiles} file requests (unmerged PRs with no review comments)`);
       }
 
-      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth, prsReviewedByUserMonth };
+      return { approvedSet, reviewsDoneByUserMonth, logicalReviewsByUserMonth, commentsByUserMonth, bodyCommentsByUserMonth, prMapByUserMonth, approvedMapByUserMonth, mergedMapByUserMonth, reviewedMapByUserMonth, actionedCommentsByUserMonth, prsReviewedByUserMonth };
     }
 
     function filterPRsByDate(prs, dateFrom, dateTo) {
@@ -1038,6 +1104,7 @@
       grouped,
       logicalReviewsByUserMonth,
       commentsByUserMonth,
+      bodyCommentsByUserMonth,
       prMapByUserMonth,
       approvedMapByUserMonth,
       mergedMapByUserMonth,
@@ -1079,9 +1146,11 @@
           const avgMergeTime = mergedCount ? (totalMergeTime / mergedCount).toFixed(2) : "0.00";
           const logicalReviews = logicalReviewsByUserMonth[user]?.[m] || 0;
           const comments = commentsByUserMonth[user]?.[m] || 0;
+          const bodyComments = bodyCommentsByUserMonth?.[user]?.[m] || 0;
           const actioned = actionedCommentsByUserMonth?.[user]?.[m] || 0;
           const prsReviewed = prsReviewedByUserMonth?.[user]?.[m]?.size || 0;
-          const avgActioned = comments ? Math.round((actioned / comments) * 100) + "%" : "—";
+          const actionableDenom = comments - bodyComments;
+          const avgActioned = actionableDenom > 0 ? Math.round((actioned / actionableDenom) * 100) + "%" : "—";
           rows.push({
             user,
             month: m,
@@ -1099,6 +1168,7 @@
             reviewedList: reviewedMapByUserMonth[user]?.[m] || [],
             actionedCount: actioned,
             totalComments: comments,
+            bodyComments: bodyComments,
             actionedPct: avgActioned
           });
         }
@@ -1123,17 +1193,27 @@
 
         if (pr.merged_at && pr.commits_url) {
           try {
-            const { data: commits, response } = await client.getCommits(pr.commits_url);
-            progress?.incApiUsage(response);
-            if (commits) {
+            if (pr._commits) {
+              // Reuse cached commit list from actioned detection
               const created = new Date(pr.created_at);
               const merged = new Date(pr.merged_at);
-              pr._updateCount = commits.filter(c => {
-                const cDate = new Date(c.commit.committer.date);
+              pr._updateCount = pr._commits.filter(c => {
+                const cDate = new Date(c.date);
                 return cDate > created && cDate < merged;
               }).length;
             } else {
-              pr._updateCount = null;
+              const { data: fetchedCommits, response } = await client.getCommits(pr.commits_url);
+              progress?.incApiUsage(response);
+              if (fetchedCommits) {
+                const created = new Date(pr.created_at);
+                const merged = new Date(pr.merged_at);
+                pr._updateCount = fetchedCommits.filter(c => {
+                  const cDate = new Date(c.commit.committer.date);
+                  return cDate > created && cDate < merged;
+                }).length;
+              } else {
+                pr._updateCount = null;
+              }
             }
           } catch {
             pr._updateCount = null;
@@ -1191,6 +1271,7 @@
         grouped,
         reviewStats.logicalReviewsByUserMonth,
         reviewStats.commentsByUserMonth,
+        reviewStats.bodyCommentsByUserMonth,
         reviewStats.prMapByUserMonth,
         reviewStats.approvedMapByUserMonth,
         reviewStats.mergedMapByUserMonth,
@@ -1593,7 +1674,7 @@
         for (const r of stats) {
           const user = isBot(r.user) ? BOT_LABEL : r.user;
           prRows.push({ user, month: r.month, count: r.count, approved: r.approved, merged: r.merged, prList: r.prList, approvedList: r.approvedList, mergedList: r.mergedList });
-          reviewRows.push({ user, month: r.month, reviewed: r.reviewed, prsReviewed: r.prsReviewed, avgCommentsPerReview: r.avgCommentsPerReview, reviewedList: r.reviewedList, actionedPct: r.actionedPct, actionedCount: r.actionedCount, totalComments: r.totalComments });
+          reviewRows.push({ user, month: r.month, reviewed: r.reviewed, prsReviewed: r.prsReviewed, avgCommentsPerReview: r.avgCommentsPerReview, reviewedList: r.reviewedList, actionedPct: r.actionedPct, actionedCount: r.actionedCount, totalComments: r.totalComments, bodyComments: r.bodyComments });
         }
 
         // Merge rows that share the same (user, month) — needed after bot consolidation
@@ -1613,12 +1694,15 @@
         }
         const mergedPrRows = mergeRows(prRows, ['count', 'approved', 'merged'], ['prList', 'approvedList', 'mergedList']);
         const mergedReviewRows = mergeRows(reviewRows,
-          ['reviewed', 'prsReviewed', 'actionedCount', 'totalComments'],
+          ['reviewed', 'prsReviewed', 'actionedCount', 'totalComments', 'bodyComments'],
           ['reviewedList']
-        ).map(r => ({
-          ...r,
-          actionedPct: r.totalComments ? Math.round((r.actionedCount / r.totalComments) * 100) + "%" : "\u2014",
-        }));
+        ).map(r => {
+          const denom = r.totalComments - (r.bodyComments || 0);
+          return {
+            ...r,
+            actionedPct: denom > 0 ? Math.round((r.actionedCount / denom) * 100) + "%" : "\u2014",
+          };
+        });
 
         // Sort both tables by user name ascending
         mergedPrRows.sort((a, b) => a.user.localeCompare(b.user));
@@ -1741,7 +1825,7 @@
         }
 
         // Peer Review Table
-        const reviewByUser = groupRows(mergedReviewRows, ["prsReviewed", "actionedCount", "totalComments"]);
+        const reviewByUser = groupRows(mergedReviewRows, ["prsReviewed", "actionedCount", "totalComments", "bodyComments"]);
         progress.setStatus("Rendering Review table…");
 
         progress.setOverallScaled(0, reviewByUser.size, 97, 100);
@@ -1761,7 +1845,9 @@
             const totalReviewed = entry.totals.prsReviewed;
             const totalActioned = entry.totals.actionedCount || 0;
             const totalCommentsAll = entry.totals.totalComments || 0;
-            const actionedPctOverall = totalCommentsAll ? Math.round((totalActioned / totalCommentsAll) * 100) + "%" : "\u2014";
+            const totalBodyCommentsAll = entry.totals.bodyComments || 0;
+            const overallDenom = totalCommentsAll - totalBodyCommentsAll;
+            const actionedPctOverall = overallDenom > 0 ? Math.round((totalActioned / overallDenom) * 100) + "%" : "\u2014";
             const tr = document.createElement("tr");
             tr.className = "summary-row cursor-pointer bg-gray-50 hover:bg-gray-100";
             tr.dataset.user = user;
